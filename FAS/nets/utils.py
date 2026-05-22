@@ -3,17 +3,17 @@ import torch
 import torch.nn as nn
 import os
 import logging
-# import torchvision.models as models
+import torchvision.models as models
 import nets.resnet as resnet
 import nets.mobilenetv2 as mobilenetv2
 import nets.mobilenetv3 as mobilenetv3
-# import nets.convnext as convnext
-# import nets.coatnet as coatnet
-# import nets.maxvit as maxvit
+import nets.convnext as convnext
+import nets.coatnet as coatnet
+import nets.maxvit as maxvit
 import nets.swin_transformer_v2 as swin_transformer_v2
-# import nets.dwspgnet as dwspgnet
-# from nets.efficientnet import EfficientNet
-# from nets.mobileone import mobileone
+import nets.dwspgnet as dwspgnet
+from nets.efficientnet import EfficientNet
+from nets.mobileone import mobileone
 from nets.shufflenetv2 import ShuffleNetV2
 
 

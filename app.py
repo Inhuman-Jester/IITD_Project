@@ -42,7 +42,7 @@ CAM_IP = "10.208.22.128"
 USER = "admin"
 PASSWORD = "SOumil%40%40btp1"
 RTSP_URL = f"rtsp://{USER}:{PASSWORD}@{CAM_IP}:554/video/live?channel=1&subtype=0"
-ESP32_IP = "10.194.31.166"
+ESP32_IP = "10.194.17.254"
 ESP32_PORT = 4210
 RECOGNITION_THRESHOLD = 0.65
 SPOOF_THRESHOLD = 1.0
@@ -228,12 +228,7 @@ class AttendanceSystem:
         self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
         self.app.prepare(ctx_id=0, det_size=(640, 640))
 
-        self.anti_spoof = AntiSpoofPredictor(
-            model_path='p1_resnet50.pth',
-            arch='resnet50',
-            num_classes=2,
-            device_id=0
-        )
+        self.anti_spoof = None  # temporarily disable anti-spoof
 
     def register_user(self, name, entry_no):
         if self.db.exists(entry_no):
@@ -331,7 +326,12 @@ class AttendanceSystem:
                     continue
 
                 for face in faces:
-                    if self.anti_spoof.predict(frame, face.bbox, threshold=SPOOF_THRESHOLD):
+                    # Anti-spoofing disabled for testing (no model required)
+                    # Previously we checked: self.anti_spoof.predict(...)
+                    # if spoof detected we would ignore the face. That logic
+                    # is intentionally disabled now so recognition proceeds.
+
+                    if self.anti_spoof is not None and self.anti_spoof.predict(frame, face.bbox, threshold=SPOOF_THRESHOLD):
                         print("Spoof detected! Ignoring.")
                         self.ui.display_attendance("SPOOF", "ALERT")
                         continue

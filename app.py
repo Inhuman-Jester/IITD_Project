@@ -27,6 +27,10 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from insightface.app import FaceAnalysis
 import threading
+from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, url_for, Response
+import logging
+from template.app_template import APP_TEMPLATE
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 FAS_DIR = os.path.join(CURRENT_DIR, 'FAS')
@@ -48,6 +52,15 @@ RECOGNITION_THRESHOLD = 0.65
 SPOOF_THRESHOLD = 1.0
 DB_PATH = "attendance_db.pkl"
 LOG_FILE = "attendance_log.txt"
+# Registration tuning
+# Countdown before first capture (seconds)
+REGISTRATION_COUNTDOWN = 1
+# Seconds to sample for each capture window
+REG_CAPTURE_WINDOW = 2.0
+# Require a second verification capture during registration
+REG_VERIFICATION_REQUIRED = True
+# Optional separate threshold for registration verification; if None, use RECOGNITION_THRESHOLD
+REG_VERIFICATION_THRESHOLD = None
 
 
 class FrameFetcher:
@@ -223,35 +236,53 @@ class AttendanceSystem:
         self.db = Database(db_path=DB_PATH)
         self.ui = ESPDisplay(ip=ESP32_IP, port=ESP32_PORT)
         self.log_file = LOG_FILE
+        self._face_lock = threading.Lock()
+        self._recognition_lock = threading.Lock()
+        self._recognition_thread = None
+        self._recognition_stop_event = threading.Event()
+        self._recognition_status = "stopped"
+        self._last_message = ""
+        self._last_attendance_message = ""
+        self._last_attendance_event_id = 0
 
         print("Initializing ArcFace...")
         self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
         self.app.prepare(ctx_id=0, det_size=(640, 640))
 
+        # persistent preview fetcher for dashboard camera stream
+        try:
+            self.preview_fetcher = FrameFetcher(RTSP_URL)
+        except Exception:
+            self.preview_fetcher = None
+
         self.anti_spoof = None  # temporarily disable anti-spoof
 
-    def register_user(self, name, entry_no):
-        if self.db.exists(entry_no):
-            ans = input(f"{entry_no} already exists. Capture again and overwrite? (y/n): ").strip().lower()
-            if ans != "y":
-                print("Update cancelled.")
-                return
+    @property
+    def recognition_running(self):
+        return self._recognition_thread is not None and self._recognition_thread.is_alive()
 
-        print(f"Starting registration for {name} ({entry_no}) in 3 seconds. Look at the camera!")
-        time.sleep(3)
+    def get_last_message(self):
+        return self._last_message
 
-        # Dedicated fetcher just for registration window
-        fetcher = FrameFetcher(RTSP_URL)
+    def _set_message(self, message):
+        self._last_message = message
+        print(message)
+
+    def _capture_best_face(self, fetcher, window_seconds=None):
         start_time = time.time()
         best_face = None
         best_frame = None
         highest_det_score = 0.0
 
-        while time.time() - start_time < 4.0:
+        if window_seconds is None:
+            window_seconds = REG_CAPTURE_WINDOW
+
+        while time.time() - start_time < window_seconds:
             ret, frame = fetcher.get_frame()
             if not ret:
                 continue
-            faces = self.app.get(frame)
+            with self._face_lock:
+                faces = self.app.get(frame)
             if faces:
                 for face in faces:
                     if face.det_score > highest_det_score:
@@ -259,69 +290,121 @@ class AttendanceSystem:
                         best_face = face
                         best_frame = frame
 
-        fetcher.stop()
+        return best_face, best_frame, highest_det_score
 
-        if not best_face or highest_det_score <= RECOGNITION_THRESHOLD:
-            print("Failed to capture a clear face. Please try again.")
-            return
+    def register_user(self, name, entry_no, overwrite=True):
+        start_time = time.time()
+        if self.db.exists(entry_no) and not overwrite:
+            self._set_message(f"{entry_no} already exists. Update cancelled.")
+            return False
+
+        if self.db.exists(entry_no) and overwrite:
+            self._set_message(f"{entry_no} already exists. Overwriting with a fresh capture.")
+
+        self._set_message(f"Starting registration for {name} ({entry_no}) in {REGISTRATION_COUNTDOWN} seconds. Look at the camera!")
+        time.sleep(REGISTRATION_COUNTDOWN)
+
+        # Dedicated fetcher just for registration window
+        fetcher = FrameFetcher(RTSP_URL)
+        first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+
+        if not first_face or first_score <= RECOGNITION_THRESHOLD:
+            fetcher.stop()
+            self._set_message("Failed to capture a clear face. Please try again.")
+            return False
+
+        # If verification is disabled, accept the first capture immediately
+        if not REG_VERIFICATION_REQUIRED:
+            second_face = first_face
+            second_frame = first_frame
+            second_score = first_score
+            verification_sim = 1.0
+        else:
+            self._set_message("First capture saved. Hold still for a second verification capture.")
+            second_face, second_frame, second_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+            fetcher.stop()
+
+            if not second_face or second_score <= RECOGNITION_THRESHOLD:
+                self._set_message("Failed to capture a clear verification face. Please try again.")
+                return False
+
+            verification_sim = self.cosine_similarity(first_face.normed_embedding, second_face.normed_embedding)
+            self._set_message(f"Verification similarity: {verification_sim:.4f}")
+
+            threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
+            if verification_sim < threshold:
+                self._set_message("Second verification did not match the first capture. Registration cancelled.")
+                return False
 
         os.makedirs(FACES_DIR, exist_ok=True)
-        x1, y1, x2, y2 = [int(v) for v in best_face.bbox]
-        h, w = best_frame.shape[:2]
-        face_crop = best_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        x1, y1, x2, y2 = [int(v) for v in second_face.bbox]
+        h, w = second_frame.shape[:2]
+        face_crop = second_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
         face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
         cv2.imwrite(face_path, face_crop)
-        print(f"Face photo saved: {face_path}")
+        self._set_message(f"Face photo saved: {face_path}")
 
-        self.db.append_or_update(entry_no, {"name": name, "embedding": best_face.normed_embedding})
-        print(f"Successfully registered {name} ({entry_no}).")
+        self.db.append_or_update(entry_no, {"name": name, "embedding": first_face.normed_embedding})
+        time_taken = time.time() - start_time
+        self._set_message(f"Successfully registered {name} ({entry_no}). Time taken : {time_taken}")
+        return True
 
     def show_user(self, entry_no):
         if not self.db.exists(entry_no):
-            print(f"Entry {entry_no} not found in database.")
-            return
+            self._set_message(f"Entry {entry_no} not found in database.")
+            return None
         face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
         if not os.path.exists(face_path):
-            print(f"No saved photo found for {entry_no}.")
-            return
+            self._set_message(f"No saved photo found for {entry_no}.")
+            return None
         name = self.db.get_all()[entry_no]["name"]
-        print(f"Registered photo for {name} ({entry_no}): {os.path.abspath(face_path)}")
+        self._set_message(f"Registered photo for {entry_no} - {name} ")
+        return face_path
 
     def cosine_similarity(self, emb1, emb2):
         return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
-    def mark_attendance(self, entry_no, name):
+    def mark_attendance(self, entry_no, name, similarity, time_taken):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"{timestamp} - {entry_no} - {name}\n"
+        log_entry = f"{timestamp} - {entry_no} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
         with open(self.log_file, 'a') as f:
             f.write(log_entry)
-        print(f"Attendance marked for {entry_no} - {name} at {timestamp}")
+        self._last_attendance_event_id += 1
+        self._last_attendance_message = f"Attendance marked for {entry_no} - {name} at {timestamp}"
+        self._set_message(self._last_attendance_message)
         self.ui.display_attendance("SUCCESS", name)
 
-    def run_recognition_loop(self):
-        print("Starting recognition loop. Press Ctrl+C to stop.")
+    def _recognition_loop(self):
         recently_marked = {}
         cooldown_period = 30
 
         fetcher = FrameFetcher(RTSP_URL)
-        print("[Main] Waiting for first frame...")
+        self._recognition_status = "starting"
+        self._set_message("Starting recognition loop.")
+        self._set_message("[Main] Waiting for first frame...")
         
         ok, _ = fetcher.get_frame(timeout=15.0)
         if not ok:
-            print("[Main] Timed out waiting for camera. Check RTSP URL.")
+            self._set_message("[Main] Timed out waiting for camera. Check RTSP URL.")
             fetcher.stop()
+            self._recognition_status = "stopped"
             return
-        print("[Main] Camera ready. Starting inference loop.")
+        self._set_message("[Main] Camera ready. Starting inference loop.")
+        self._recognition_status = "running"
 
         try:
-            while True:
-                ret, frame = fetcher.get_frame()
+            while not self._recognition_stop_event.is_set():
+                start_time = time.time()
+                ret, frame = fetcher.get_frame(timeout=1.0)
                 if not ret:
-                    print("[Main] No frame available yet...")
+                    if self._recognition_stop_event.is_set():
+                        break
+                    self._set_message("[Main] No frame available yet...")
                     time.sleep(0.1)
                     continue
 
-                faces = self.app.get(frame)
+                with self._face_lock:
+                    faces = self.app.get(frame)
                 if not faces:
                     continue
 
@@ -332,7 +415,7 @@ class AttendanceSystem:
                     # is intentionally disabled now so recognition proceeds.
 
                     if self.anti_spoof is not None and self.anti_spoof.predict(frame, face.bbox, threshold=SPOOF_THRESHOLD):
-                        print("Spoof detected! Ignoring.")
+                        self._set_message("Spoof detected! Ignoring.")
                         self.ui.display_attendance("SPOOF", "ALERT")
                         continue
 
@@ -344,36 +427,189 @@ class AttendanceSystem:
                             highest_sim = sim
                             best_match_entry = entry_no
 
-                    print(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
+                    self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 
                     if highest_sim > RECOGNITION_THRESHOLD and best_match_entry:
                         current_time = time.time()
                         name = self.db.get_all()[best_match_entry]["name"]
                         if best_match_entry not in recently_marked or \
                            (current_time - recently_marked[best_match_entry]) > cooldown_period:
-                            self.mark_attendance(best_match_entry, name)
+                            end_time = time.time()
+                            self.mark_attendance(best_match_entry, name, highest_sim, end_time - start_time)
                             recently_marked[best_match_entry] = current_time
 
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            self._set_message("Shutting down gracefully...")
         finally:
             fetcher.stop()
+            self._recognition_status = "stopped"
+
+    def start_recognition(self):
+        with self._recognition_lock:
+            if self.recognition_running:
+                return False, "Recognition is already running."
+
+            self._recognition_stop_event.clear()
+            self._recognition_thread = threading.Thread(target=self._recognition_loop, daemon=True, name="RecognitionLoop")
+            self._recognition_thread.start()
+            return True, "Recognition started."
+
+    def stop_recognition(self):
+        self._recognition_stop_event.set()
+        thread = self._recognition_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
+        self._recognition_status = "stopped"
+        return True, "Recognition stopped."
+
+    def get_log_lines(self, limit=12):
+        if not os.path.exists(self.log_file):
+            return []
+
+        with open(self.log_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return lines[-limit:]
+
+
+def create_flask_app(system: AttendanceSystem):
+    flask_app = Flask(__name__)
+    flask_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "smart-attendance-dashboard")
+
+    @flask_app.route("/", methods=["GET"])
+    def index():
+        selected_entry_no = request.args.get("entry_no", "").strip()
+        name_arg = request.args.get("name", "").strip()
+        selected_name = None
+        face_exists = False
+        if selected_entry_no and system.db.exists(selected_entry_no):
+            selected_name = system.db.get_all()[selected_entry_no]["name"]
+            face_exists = os.path.exists(os.path.join(FACES_DIR, f"{selected_entry_no}.jpg"))
+        else:
+            selected_name = name_arg
+
+        # Suggest an entry_no: the count of known faces + 1
+        suggested_entry_no = str(len(system.db.get_all()) + 1)
+
+        return render_template_string(
+            APP_TEMPLATE,
+            recognition_running=system.recognition_running,
+            registered_count=len(system.db.get_all()),
+            log_count=len(system.get_log_lines(limit=1000)),
+            registered_faces=sorted(system.db.get_all().items()),
+            log_lines=system.get_log_lines(),
+            selected_entry_no=selected_entry_no,
+            selected_name=selected_name,
+            face_exists=face_exists,
+            suggested_entry_no=suggested_entry_no,
+        )
+
+    @flask_app.route("/register", methods=["POST"])
+    def register_user_route():
+        name = request.form.get("name", "").strip()
+        entry_no = request.form.get("entry_no", "").strip()
+        overwrite = request.form.get("overwrite") == "1"
+
+        if not name or not entry_no:
+            flash("Name and Entry No are required.")
+            return redirect(url_for("index", entry_no=entry_no, name=name))
+
+        success = system.register_user(name=name, entry_no=entry_no, overwrite=overwrite)
+        flash(system.get_last_message() if system.get_last_message() else ("Registration complete." if success else "Registration failed."))
+        return redirect(url_for("index", entry_no=entry_no, name=name))
+
+    @flask_app.route("/show", methods=["GET"])
+    def show_user_route():
+        entry_no = request.args.get("entry_no", "").strip()
+        if not entry_no:
+            flash("Enter an Entry No to show a saved photo.")
+            return redirect(url_for("index"))
+
+        system.show_user(entry_no)
+        flash(system.get_last_message() if system.get_last_message() else "Lookup complete.")
+        return redirect(url_for("index", entry_no=entry_no))
+
+    @flask_app.route("/faces/<entry_no>", methods=["GET"])
+    def face_image(entry_no):
+        if not system.db.exists(entry_no):
+            flash(f"Entry {entry_no} not found in database.")
+            return redirect(url_for("index"))
+
+        response = send_from_directory(FACES_DIR, f"{entry_no}.jpg")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @flask_app.route("/start", methods=["POST"])
+    def start_recognition_route():
+        ok, message = system.start_recognition()
+        flash(message)
+        return redirect(url_for("index"))
+
+    @flask_app.route("/stop", methods=["POST"])
+    def stop_recognition_route():
+        system.stop_recognition()
+        flash("Recognition stopped.")
+        return redirect(url_for("index"))
+
+    @flask_app.route("/status", methods=["GET"])
+    def status():
+        return {
+            "recognition_running": system.recognition_running,
+            "recognition_status": system._recognition_status,
+            "registered_users": len(system.db.get_all()),
+            "last_attendance_event_id": system._last_attendance_event_id,
+            "last_attendance_message": system._last_attendance_message,
+            "recent_log_lines": system.get_log_lines(),
+        }
+
+    @flask_app.route('/camera_feed')
+    def camera_feed():
+        if not getattr(system, 'preview_fetcher', None):
+            return "Camera not available", 503
+
+        def gen():
+            while True:
+                ok, frame = system.preview_fetcher.get_frame(timeout=2.0)
+                if not ok or frame is None:
+                    if system._recognition_stop_event.is_set():
+                        break
+                    continue
+                ret, jpeg = cv2.imencode('.jpg', frame)
+                if not ret:
+                    continue
+                chunk = jpeg.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + chunk + b'\r\n')
+                time.sleep(0.03)
+
+        return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @flask_app.route('/camera_snapshot')
+    def camera_snapshot():
+        if not getattr(system, 'preview_fetcher', None):
+            return "Camera not available", 503
+
+        ok, frame = system.preview_fetcher.get_frame(timeout=2.0)
+        if not ok or frame is None:
+            return "Frame not available", 503
+
+        ret, jpeg = cv2.imencode('.jpg', frame)
+        if not ret:
+            return "Failed to encode frame", 500
+
+        response = Response(jpeg.tobytes(), mimetype='image/jpeg')
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
+
+    return flask_app
 
 
 if __name__ == "__main__":
     system = AttendanceSystem()
-
-    while True:
-        mode = input("\nEnter mode (register/run/show): ").strip().lower()
-        if mode == "register":
-            name = input("Enter Name: ")
-            entry_no = input("Enter Entry No: ")
-            system.register_user(name, entry_no)
-        elif mode == "run":
-            system.run_recognition_loop()
-            break
-        elif mode == "show":
-            entry_no = input("Enter Entry No: ")
-            system.show_user(entry_no)
-        else:
-            print("Invalid input.")
+    app = create_flask_app(system)
+    host = os.environ.get("FLASK_HOST", "0.0.0.0")
+    port = int(os.environ.get("FLASK_PORT", "5000"))
+    app.run(host=host, port=port, debug=True, threaded=True)

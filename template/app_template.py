@@ -136,7 +136,7 @@ APP_TEMPLATE = """
         <div class="hero">
             <section class="card">
                 <h1>Smart Attendance Dashboard</h1>
-                <p class="lead">Use the forms below to register a person, inspect a saved face image, and control the live RTSP recognition loop. The recognition pipeline still performs face detection, ArcFace matching, attendance logging, and ESP32 updates.</p>
+                <p class="lead">Use the forms below to register a person and inspect a saved face image. Recognition runs continuously in the background and automatically marks attendance.</p>
                 <div class="feed-wrap">
                     <img id="liveFeed" src="{{ url_for('camera_snapshot') }}" alt="Live camera">
                 </div>
@@ -146,7 +146,7 @@ APP_TEMPLATE = """
                 <div class="stats">
                     <div class="stat">
                         <div class="label">Recognition</div>
-                        <div class="value">{{ 'Running' if recognition_running else 'Stopped' }}</div>
+                        <div class="value">{{ 'Running' if recognition_running else 'Restarting' }}</div>
                     </div>
                     <div class="stat">
                         <div class="label">Registered users</div>
@@ -190,17 +190,8 @@ APP_TEMPLATE = """
             </section>
 
             <section class="card">
-                <h2>Attendance Control</h2>
-                <p class="muted" style="margin: 8px 0 16px;">Run or stop the live recognition worker without leaving the browser.</p>
-                <div class="row" style="margin-bottom: 14px;">
-                    <form method="post" action="{{ url_for('start_recognition_route') }}">
-                        <button class="btn success" type="submit">Start recognition</button>
-                    </form>
-                    <form method="post" action="{{ url_for('stop_recognition_route') }}">
-                        <button class="btn danger" type="submit">Stop recognition</button>
-                    </form>
-                </div>
-
+                <h2>Show Registered Face</h2>
+                <p class="muted" style="margin: 8px 0 16px;">Find and preview the saved cropped face image for an entry number.</p>
                 <form method="get" action="{{ url_for('show_user_route') }}">
                     <label>Entry No
                         <input type="text" name="entry_no" required>
@@ -256,7 +247,7 @@ APP_TEMPLATE = """
             </section>
         </div>
 
-        <div class="footer-note">Pipeline state is preserved in <a href="{{ url_for('index') }}">this dashboard</a>. Recognition should be started once the RTSP camera is reachable.</div>
+        <div class="footer-note">Pipeline state is preserved in <a href="{{ url_for('index') }}">this dashboard</a>. Recognition is kept running automatically once the app is up.</div>
     </div>
     <script>
         (function () {

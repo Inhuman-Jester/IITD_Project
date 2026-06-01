@@ -20,7 +20,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS students (
         id SERIAL PRIMARY KEY,
         student_name VARCHAR(100) NOT NULL,
-        entry_number VARCHAR(20) UNIQUE NOT NULL
+        kerberos_id VARCHAR(20) UNIQUE NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS student_faces (

@@ -2,6 +2,7 @@ import os
 import time
 import socket
 import threading
+import cv2
 from database.schema import pool
 import numpy as np
 from insightface.app import FaceAnalysis
@@ -14,6 +15,7 @@ LOG_FILE = "attendance_log.txt"
 REG_CAPTURE_WINDOW = 2
 RTSP_URL = os.getenv("RTSP_URL")
 RECOGNITION_THRESHOLD = 0.35
+FACES_DIR = "registered_faces"
 
 
 class ESPDisplay:
@@ -91,6 +93,119 @@ class AttendanceSystem:
 
         return best_face, best_frame, highest_det_score
 
+    def exists(self, entry_no):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM students WHERE kerberos_id = %s LIMIT 1;",
+                    (entry_no,),
+                )
+                return cur.fetchone() is not None
+
+    def get_all(self):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT kerberos_id, student_name FROM students ORDER BY kerberos_id ASC;"
+                )
+                rows = cur.fetchall()
+        return {entry_no: {"name": student_name} for entry_no, student_name in rows}
+
+    def register_user(self, name, entry_no, overwrite=True):
+        entry_no = (entry_no or "").strip()
+        name = (name or "").strip()
+        if not entry_no or not name:
+            self._set_message("Name and Entry No are required.")
+            return False
+
+        exists_already = self.exists(entry_no)
+        if exists_already and not overwrite:
+            self._set_message(f"{entry_no} already exists. Update cancelled.")
+            return False
+
+        fetcher = FrameFetcher(RTSP_URL)
+        try:
+            face, frame, det_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+        finally:
+            fetcher.stop()
+
+        if not face or frame is None or det_score <= RECOGNITION_THRESHOLD:
+            self._set_message("Failed to capture a clear face. Please try again.")
+            return False
+
+        x1, y1, x2, y2 = [int(v) for v in face.bbox]
+        h, w = frame.shape[:2]
+        face_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        if face_crop.size == 0:
+            self._set_message("Captured face was invalid. Please try again.")
+            return False
+
+        os.makedirs(FACES_DIR, exist_ok=True)
+        face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
+        cv2.imwrite(face_path, face_crop)
+
+        embedding = face.normed_embedding.tolist()
+        vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
+
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                if exists_already:
+                    cur.execute(
+                        """
+                        UPDATE students
+                        SET student_name = %s
+                        WHERE kerberos_id = %s
+                        RETURNING id;
+                        """,
+                        (name, entry_no),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO students (student_name, Kerberos_ID)
+                        VALUES (%s, %s)
+                        RETURNING id;
+                        """,
+                        (name, entry_no),
+                    )
+
+                student_id = cur.fetchone()[0]
+                cur.execute("DELETE FROM student_faces WHERE student_id = %s;", (student_id,))
+                cur.execute(
+                    """
+                    INSERT INTO student_faces (student_id, embedding)
+                    VALUES (%s, %s::vector);
+                    """,
+                    (student_id, vector_literal),
+                )
+            conn.commit()
+
+        self._set_message(f"Successfully registered {name} ({entry_no}).")
+        return True
+
+    def show_user(self, entry_no):
+        entry_no = (entry_no or "").strip()
+        if not self.exists(entry_no):
+            self._set_message(f"Entry {entry_no} not found in database.")
+            return None
+
+        face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
+        if not os.path.exists(face_path):
+            self._set_message(f"No saved photo found for {entry_no}.")
+            return None
+
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT student_name FROM students WHERE Kerberos_ID = %s LIMIT 1;",
+                    (entry_no,),
+                )
+                row = cur.fetchone()
+
+        student_name = row[0] if row else "Unknown"
+        self._set_message(f"Registered photo for {entry_no} - {student_name}")
+        return face_path
+
     def mark_attendance(self, entry_no, name, similarity, time_taken):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"{timestamp} - {entry_no} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
@@ -156,10 +271,10 @@ class AttendanceSystem:
                     with self.db.connection() as conn:
                         with conn.cursor() as cur:
                             cur.execute("""
-                                SELECT s.student_name, s.roll_number, MIN(f.embedding <=> %s) AS min_distance
+                                SELECT s.student_name, s.Kerberos_ID , MIN(f.embedding <=> %s) AS min_distance
                                 FROM student_faces f
                                 JOIN students s ON f.student_id = s.id
-                                GROUP BY s.id, s.student_name, s.roll_number
+                                GROUP BY s.id, s.student_name, s.kerberos_id
                                 HAVING MIN(f.embedding <=> %s) <= %s
                                 ORDER BY min_distance ASC
                                 LIMIT 1;
@@ -170,8 +285,12 @@ class AttendanceSystem:
                     if result:
                         student_name, roll_number, min_distance = result
                         best_match_entry = roll_number
+                        highest_sim = max(0.0, 1.0 - float(min_distance))
                     
                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
+
+                    if not best_match_entry:
+                        continue
 
                     current_time = time.time()
                     if best_match_entry not in recently_marked or \

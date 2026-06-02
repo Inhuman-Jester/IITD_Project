@@ -7,14 +7,24 @@ from database.schema import pool
 import numpy as np
 from insightface.app import FaceAnalysis
 from utils.frame import FrameFetcher
+from dotenv import load_dotenv
+from urllib.parse import quote, unquote
 
+load_dotenv()
 
 ESP32_IP = os.getenv("ESP32_IP")
 ESP32_PORT = 4210
 LOG_FILE = "attendance_log.txt"
 REG_CAPTURE_WINDOW = 2
-RTSP_URL = os.getenv("RTSP_URL")
-RECOGNITION_THRESHOLD = 0.35
+CAM_IP = os.getenv("CAM_IP", "10.208.22.128")
+CAM_USER = os.getenv("CAM_USER", "admin")
+CAM_PASSWORD = os.getenv("CAM_PASSWORD", "SOumil@@btp1")
+RTSP_URL = (
+    f"rtsp://{quote(unquote(CAM_USER), safe='')}:{quote(unquote(CAM_PASSWORD), safe='')}"
+    f"@{CAM_IP}:554/video/live?channel=1&subtype=0"
+)
+RECOGNITION_THRESHOLD = 0.65
+REG_VERIFICATION_THRESHOLD = 0.65
 FACES_DIR = "registered_faces"
 
 
@@ -67,7 +77,7 @@ class AttendanceSystem:
 
     def _set_message(self, message):
         self._last_message = message
-        print(message)
+        # print(message)
 
     def _capture_best_face(self, fetcher, window_seconds=None):
         start_time = time.time()
@@ -92,13 +102,16 @@ class AttendanceSystem:
                         best_frame = frame
 
         return best_face, best_frame, highest_det_score
+    
+    def cosine_similarity(self, emb1, emb2):
+        return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
-    def exists(self, entry_no):
+    def exists(self, kerberos_id):
         with self.db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM students WHERE kerberos_id = %s LIMIT 1;",
-                    (entry_no,),
+                    (kerberos_id,),
                 )
                 return cur.fetchone() is not None
 
@@ -109,110 +122,211 @@ class AttendanceSystem:
                     "SELECT kerberos_id, student_name FROM students ORDER BY kerberos_id ASC;"
                 )
                 rows = cur.fetchall()
-        return {entry_no: {"name": student_name} for entry_no, student_name in rows}
+        return {kerberos_id: {"name": student_name} for kerberos_id, student_name in rows}
 
-    def register_user(self, name, entry_no, overwrite=True):
-        entry_no = (entry_no or "").strip()
+    def get_registered_photo(self, kerberos_id):
+        kerberos_id = (kerberos_id or "").strip()
+        if not kerberos_id:
+            return None
+
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT s.student_name, f.face_image, f.sample_number
+                    FROM students s
+                    JOIN student_faces f ON f.student_id = s.id
+                    WHERE s.kerberos_id = %s AND f.face_image IS NOT NULL
+                    ORDER BY f.sample_number DESC, f.id DESC
+                    LIMIT 1;
+                    """,
+                    (kerberos_id,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        student_name, face_image, sample_number = row
+        return student_name, bytes(face_image), sample_number
+
+    def register_user(self, name, kerberos_id, overwrite=True):
+        kerberos_id = (kerberos_id or "").strip()
         name = (name or "").strip()
-        if not entry_no or not name:
-            self._set_message("Name and Entry No are required.")
+        if not kerberos_id or not name:
+            self._set_message("Name and Kerberos ID are required.")
             return False
 
-        exists_already = self.exists(entry_no)
+        exists_already = self.exists(kerberos_id)
         if exists_already and not overwrite:
-            self._set_message(f"{entry_no} already exists. Update cancelled.")
+            self._set_message(f"{kerberos_id} already exists. Update cancelled.")
             return False
 
         fetcher = FrameFetcher(RTSP_URL)
-        try:
-            face, frame, det_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
-        finally:
-            fetcher.stop()
+        first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
 
-        if not face or frame is None or det_score <= RECOGNITION_THRESHOLD:
+        if not first_face or first_score <= RECOGNITION_THRESHOLD:
+            fetcher.stop()
             self._set_message("Failed to capture a clear face. Please try again.")
             return False
+        
+        self._set_message("First capture saved. Hold still for a second verification capture.")
+        second_face, second_frame, second_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+        fetcher.stop()
 
-        x1, y1, x2, y2 = [int(v) for v in face.bbox]
-        h, w = frame.shape[:2]
-        face_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        if not second_face or second_score <= RECOGNITION_THRESHOLD:
+            self._set_message("Failed to capture a clear verification face. Please try again.")
+            return False
+
+        verification_sim = self.cosine_similarity(first_face.normed_embedding, second_face.normed_embedding)
+        self._set_message(f"Verification similarity: {verification_sim:.4f}")
+
+        threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
+        if verification_sim < threshold:
+            self._set_message("Second verification did not match the first capture. Registration cancelled.")
+            return False
+
+
+        x1, y1, x2, y2 = [int(v) for v in first_face.bbox]
+        h, w = first_frame.shape[:2]
+        face_crop = first_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
         if face_crop.size == 0:
             self._set_message("Captured face was invalid. Please try again.")
             return False
 
-        os.makedirs(FACES_DIR, exist_ok=True)
-        face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
-        cv2.imwrite(face_path, face_crop)
+        success, encoded_image = cv2.imencode(".jpg", face_crop)
+        if not success:
+            self._set_message("Failed to encode captured face. Please try again.")
+            return False
 
-        embedding = face.normed_embedding.tolist()
+        embedding = first_face.normed_embedding.tolist()
         vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
+        face_image = encoded_image.tobytes()
 
         with self.db.connection() as conn:
             with conn.cursor() as cur:
                 if exists_already:
                     cur.execute(
+                        "SELECT id FROM students WHERE kerberos_id = %s FOR UPDATE;",
+                        (kerberos_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        self._set_message(f"Kerberos ID {kerberos_id} not found in database.")
+                        return False
+
+                    student_id = row[0]
+                    # Count existing face samples while holding the student row lock
+                    cur.execute(
+                        "SELECT COUNT(*) FROM student_faces WHERE student_id = %s;",
+                        (student_id,),
+                    )
+                    face_count = cur.fetchone()[0]
+                    if face_count >= 3:
+                        self._set_message(f"{kerberos_id} already has 3 face samples. Add another face is blocked.")
+                        return False
+
+                    cur.execute(
                         """
                         UPDATE students
                         SET student_name = %s
-                        WHERE kerberos_id = %s
-                        RETURNING id;
+                        WHERE id = %s;
                         """,
-                        (name, entry_no),
+                        (name, student_id),
                     )
                 else:
                     cur.execute(
                         """
-                        INSERT INTO students (student_name, Kerberos_ID)
+                        INSERT INTO students (student_name, kerberos_id)
                         VALUES (%s, %s)
                         RETURNING id;
                         """,
-                        (name, entry_no),
+                        (name, kerberos_id),
                     )
 
-                student_id = cur.fetchone()[0]
-                cur.execute("DELETE FROM student_faces WHERE student_id = %s;", (student_id,))
-                cur.execute(
-                    """
-                    INSERT INTO student_faces (student_id, embedding)
-                    VALUES (%s, %s::vector);
-                    """,
-                    (student_id, vector_literal),
-                )
+                    student_id = cur.fetchone()[0]
+
+                    cur.execute(
+                        "SELECT COUNT(*) FROM student_faces WHERE student_id = %s;",
+                        (student_id,),
+                    )
+                    face_count = cur.fetchone()[0]
+
+                sample_number = face_count + 1
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO student_faces (
+                            student_id,
+                            sample_number,
+                            face_image,
+                            embedding,
+                            captured_at
+                        )
+                        VALUES (%s, %s, %s, %s::vector, NOW());
+                        """,
+                        (student_id, sample_number, face_image, vector_literal),
+                    )
+                except Exception as e:
+                    # Handle unique constraint or other DB errors gracefully
+                    conn.rollback()
+                    self._set_message(f"Failed to store face sample: {e}")
+                    return False
             conn.commit()
 
-        self._set_message(f"Successfully registered {name} ({entry_no}).")
+        self._set_message(f"Successfully registered {name} ({kerberos_id}) with face sample {sample_number}/3.")
         return True
 
-    def show_user(self, entry_no):
-        entry_no = (entry_no or "").strip()
-        if not self.exists(entry_no):
-            self._set_message(f"Entry {entry_no} not found in database.")
+    def show_user(self, kerberos_id):
+        kerberos_id = (kerberos_id or "").strip()
+        if not self.exists(kerberos_id):
+            self._set_message(f"Kerberos ID {kerberos_id} not found in database.")
             return None
 
-        face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
-        if not os.path.exists(face_path):
-            self._set_message(f"No saved photo found for {entry_no}.")
-            return None
+        photo_record = self.get_registered_photo(kerberos_id)
+        if photo_record:
+            student_name, _, sample_number = photo_record
+            self._set_message(f"Registered photo for {kerberos_id} - {student_name} (sample {sample_number}/3)")
+            return photo_record
+
+        face_path = os.path.join(FACES_DIR, f"{kerberos_id}.jpg")
+        if os.path.exists(face_path):
+            self._set_message(f"Registered photo for {kerberos_id} is still available locally.")
+            return face_path
+
+        self._set_message(f"No saved photo found for {kerberos_id}.")
+        return None
+
+    def mark_attendance(self, kerberos_id, name, similarity, time_taken):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"{timestamp} - {kerberos_id} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
+        with open(self.log_file, 'a') as f:
+            f.write(log_entry)
 
         with self.db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT student_name FROM students WHERE Kerberos_ID = %s LIMIT 1;",
-                    (entry_no,),
+                    """
+                    INSERT INTO attendance_records (
+                        student_id,
+                        attendance_date,
+                        attendance_time,
+                        similarity,
+                        time_taken
+                    )
+                    SELECT id, CURRENT_DATE, NOW(), %s, %s
+                    FROM students
+                    WHERE kerberos_id = %s
+                    LIMIT 1
+                    ON CONFLICT (student_id, attendance_date) DO NOTHING;
+                    """,
+                    (similarity, time_taken, kerberos_id),
                 )
-                row = cur.fetchone()
+                if cur.rowcount > 0:
+                    conn.commit()
 
-        student_name = row[0] if row else "Unknown"
-        self._set_message(f"Registered photo for {entry_no} - {student_name}")
-        return face_path
-
-    def mark_attendance(self, entry_no, name, similarity, time_taken):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"{timestamp} - {entry_no} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
-        with open(self.log_file, 'a') as f:
-            f.write(log_entry)
         self._last_attendance_event_id += 1
-        self._last_attendance_message = f"Attendance marked for {entry_no} - {name} at {timestamp}"
+        self._last_attendance_message = f"Attendance marked for {kerberos_id} - {name} at {timestamp}"
         self._set_message(self._last_attendance_message)
         self.ui.display_attendance("SUCCESS", name)
         print(self._last_attendance_message)
@@ -264,27 +378,32 @@ class AttendanceSystem:
                     #     continue
                     embedding = face.normed_embedding.tolist()
 
+                    # Convert embedding to a pgvector literal so psycopg doesn't send it
+                    # as a SQL array (double precision[]). The query casts this
+                    # literal to type `vector` so the <=> operator is available.
+                    embedding_vector = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+
                     best_match_entry = None
                     highest_sim = 0.0
 
                     result = None
                     with self.db.connection() as conn:
                         with conn.cursor() as cur:
-                            cur.execute("""
-                                SELECT s.student_name, s.Kerberos_ID , MIN(f.embedding <=> %s) AS min_distance
-                                FROM student_faces f
-                                JOIN students s ON f.student_id = s.id
-                                GROUP BY s.id, s.student_name, s.kerberos_id
-                                HAVING MIN(f.embedding <=> %s) <= %s
-                                ORDER BY min_distance ASC
-                                LIMIT 1;
-                            """, (embedding, embedding, RECOGNITION_THRESHOLD))
-                            
-                            result = cur.fetchone()
+                                cur.execute("""
+                                    SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
+                                    FROM student_faces f
+                                    JOIN students s ON f.student_id = s.id
+                                    GROUP BY s.id, s.student_name, s.kerberos_id
+                                    HAVING MIN(f.embedding <=> %s::vector) <= %s
+                                    ORDER BY min_distance ASC
+                                    LIMIT 1;
+                                """, (embedding_vector, embedding_vector, 1-RECOGNITION_THRESHOLD))
+
+                                result = cur.fetchone()
                             
                     if result:
-                        student_name, roll_number, min_distance = result
-                        best_match_entry = roll_number
+                        student_name, kerberos_id, min_distance = result
+                        best_match_entry = kerberos_id
                         highest_sim = max(0.0, 1.0 - float(min_distance))
                     
                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")

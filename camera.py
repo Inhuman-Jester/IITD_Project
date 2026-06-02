@@ -75,6 +75,7 @@ def draw_overlay(frame, lines):
     
 def main():
     cam = ONVIFCamera(HOST, PORT, USERNAME, PASSWORD, transport=transport)
+    print(f"Connected to camera at {HOST}:{PORT}")
     dev = cam.create_devicemgmt_service()
 
     print(dev.GetDeviceInformation())
@@ -120,4 +121,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print("Starting camera viewer...")
     main()

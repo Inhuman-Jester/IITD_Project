@@ -45,15 +45,10 @@ if FAS_DIR not in sys.path:
 from FAS.nets.utils import get_model
 
 # --- Configuration ---
-CAM_IP = "10.208.22.128"
-USER = "admin"
-PASSWORD = "SOumil%40%40btp1"
-RTSP_URL = f"rtsp://{USER}:{PASSWORD}@{CAM_IP}:554/video/live?channel=1&subtype=0"
 ESP32_IP = "10.194.17.254"
 ESP32_PORT = 4210
 RECOGNITION_THRESHOLD = 0.65
 SPOOF_THRESHOLD = 1.0
-DB_PATH = "attendance_db.pkl"
 LOG_FILE = "attendance_log.txt"
 # Registration tuning
 # Countdown before first capture (seconds)
@@ -222,12 +217,12 @@ class AntiSpoofPredictor:
 #             pickle.dump(self.known_faces, f)
 #         os.replace(tmp_path, self.db_path)
 
-#     def append_or_update(self, entry_no, user_data):
-#         self.known_faces[entry_no] = user_data
+#     def append_or_update(self, kerberos_id, user_data):
+#         self.known_faces[kerberos_id] = user_data
 #         self.save_db()
 
-#     def exists(self, entry_no):
-#         return entry_no in self.known_faces
+#     def exists(self, kerberos_id):
+#         return kerberos_id in self.known_faces
 
 #     def get_all(self):
 #         return self.known_faces
@@ -295,16 +290,16 @@ class AntiSpoofPredictor:
 
 #         return best_face, best_frame, highest_det_score
 
-#     def register_user(self, name, entry_no, overwrite=True):
+#     def register_user(self, name, kerberos_id, overwrite=True):
 #         start_time = time.time()
-#         if self.db.exists(entry_no) and not overwrite:
-#             self._set_message(f"{entry_no} already exists. Update cancelled.")
+#         if self.db.exists(kerberos_id) and not overwrite:
+#             self._set_message(f"{kerberos_id} already exists. Update cancelled.")
 #             return False
 
-#         if self.db.exists(entry_no) and overwrite:
-#             self._set_message(f"{entry_no} already exists. Overwriting with a fresh capture.")
+#         if self.db.exists(kerberos_id) and overwrite:
+#             self._set_message(f"{kerberos_id} already exists. Overwriting with a fresh capture.")
 
-#         self._set_message(f"Starting registration for {name} ({entry_no}) in {REGISTRATION_COUNTDOWN} seconds. Look at the camera!")
+#         self._set_message(f"Starting registration for {name} ({kerberos_id}) in {REGISTRATION_COUNTDOWN} seconds. Look at the camera!")
 #         time.sleep(REGISTRATION_COUNTDOWN)
 
 #         # Dedicated fetcher just for registration window
@@ -343,37 +338,37 @@ class AntiSpoofPredictor:
 #         x1, y1, x2, y2 = [int(v) for v in second_face.bbox]
 #         h, w = second_frame.shape[:2]
 #         face_crop = second_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-#         face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
+#         face_path = os.path.join(FACES_DIR, f"{kerberos_id}.jpg")
 #         cv2.imwrite(face_path, face_crop)
 #         self._set_message(f"Face photo saved: {face_path}")
 
-#         self.db.append_or_update(entry_no, {"name": name, "embedding": first_face.normed_embedding})
+#         self.db.append_or_update(kerberos_id, {"name": name, "embedding": first_face.normed_embedding})
 #         time_taken = time.time() - start_time
-#         self._set_message(f"Successfully registered {name} ({entry_no}). Time taken : {time_taken}")
+#         self._set_message(f"Successfully registered {name} ({kerberos_id}). Time taken : {time_taken}")
 #         return True
 
-#     def show_user(self, entry_no):
-#         if not self.db.exists(entry_no):
-#             self._set_message(f"Entry {entry_no} not found in database.")
+#     def show_user(self, kerberos_id):
+#         if not self.db.exists(kerberos_id):
+#             self._set_message(f"Entry {kerberos_id} not found in database.")
 #             return None
-#         face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
+#         face_path = os.path.join(FACES_DIR, f"{kerberos_id}.jpg")
 #         if not os.path.exists(face_path):
-#             self._set_message(f"No saved photo found for {entry_no}.")
+#             self._set_message(f"No saved photo found for {kerberos_id}.")
 #             return None
-#         name = self.db.get_all()[entry_no]["name"]
-#         self._set_message(f"Registered photo for {entry_no} - {name} ")
+#         name = self.db.get_all()[kerberos_id]["name"]
+#         self._set_message(f"Registered photo for {kerberos_id} - {name} ")
 #         return face_path
 
 #     def cosine_similarity(self, emb1, emb2):
 #         return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
-#     def mark_attendance(self, entry_no, name, similarity, time_taken):
+#     def mark_attendance(self, kerberos_id, name, similarity, time_taken):
 #         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-#         log_entry = f"{timestamp} - {entry_no} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
+#         log_entry = f"{timestamp} - {kerberos_id} - {name} - {similarity:.4f} - {time_taken:.2f}s\n"
 #         with open(self.log_file, 'a') as f:
 #             f.write(log_entry)
 #         self._last_attendance_event_id += 1
-#         self._last_attendance_message = f"Attendance marked for {entry_no} - {name} at {timestamp}"
+#         self._last_attendance_message = f"Attendance marked for {kerberos_id} - {name} at {timestamp}"
 #         self._set_message(self._last_attendance_message)
 #         self.ui.display_attendance("SUCCESS", name)
 
@@ -424,11 +419,11 @@ class AntiSpoofPredictor:
 
 #                     best_match_entry = None
 #                     highest_sim = 0.0
-#                     for entry_no, data in self.db.get_all().items():
+#                     for kerberos_id, data in self.db.get_all().items():
 #                         sim = self.cosine_similarity(face.normed_embedding, data["embedding"])
 #                         if sim > highest_sim:
 #                             highest_sim = sim
-#                             best_match_entry = entry_no
+#                             best_match_entry = kerberos_id
 
 #                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 
@@ -509,9 +504,6 @@ def create_flask_app(system: AttendanceSystem):
             APP_TEMPLATE,
             recognition_running=system.recognition_running,
             registered_count=len(all_users),
-            log_count=len(system.get_log_lines(limit=1000)),
-            registered_faces=sorted(all_users.items()),
-            log_lines=system.get_log_lines(),
             selected_entry_no=selected_entry_no,
             selected_name=selected_name,
             face_exists=face_exists,
@@ -525,10 +517,10 @@ def create_flask_app(system: AttendanceSystem):
         overwrite = request.form.get("overwrite") == "1"
 
         if not name or not entry_no:
-            flash("Name and Entry No are required.")
+            flash("Name and Kerberos ID are required.")
             return redirect(url_for("index", entry_no=entry_no, name=name))
 
-        success = system.register_user(name=name, entry_no=entry_no, overwrite=overwrite)
+        success = system.register_user(name=name, kerberos_id=entry_no, overwrite=overwrite)
         flash(system.get_last_message() if system.get_last_message() else ("Registration complete." if success else "Registration failed."))
         return redirect(url_for("index", entry_no=entry_no, name=name))
 
@@ -536,7 +528,7 @@ def create_flask_app(system: AttendanceSystem):
     def show_user_route():
         entry_no = request.args.get("entry_no", "").strip()
         if not entry_no:
-            flash("Enter an Entry No to show a saved photo.")
+            flash("Enter a Kerberos ID to show a saved photo.")
             return redirect(url_for("index"))
 
         system.show_user(entry_no)
@@ -549,7 +541,18 @@ def create_flask_app(system: AttendanceSystem):
             flash(f"Entry {entry_no} not found in database.")
             return redirect(url_for("index"))
 
-        response = send_from_directory(FACES_DIR, f"{entry_no}.jpg")
+        photo_record = system.get_registered_photo(entry_no)
+        if photo_record:
+            _, face_image, _ = photo_record
+            response = Response(face_image, mimetype="image/jpeg")
+        else:
+            face_path = os.path.join(FACES_DIR, f"{entry_no}.jpg")
+            if not os.path.exists(face_path):
+                flash(f"No saved photo found for {entry_no}.")
+                return redirect(url_for("index", entry_no=entry_no))
+
+            response = send_from_directory(FACES_DIR, f"{entry_no}.jpg")
+
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -563,7 +566,6 @@ def create_flask_app(system: AttendanceSystem):
             "registered_users": len(system.get_all()),
             "last_attendance_event_id": system._last_attendance_event_id,
             "last_attendance_message": system._last_attendance_message,
-            "recent_log_lines": system.get_log_lines(),
         }
 
     @flask_app.route('/camera_feed')

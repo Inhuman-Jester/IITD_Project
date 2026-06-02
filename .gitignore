@@ -260,3 +260,11 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,flask
+
+# Python bytecode
+*.pyc
+*.pyo
+*.pyd
+
+# Python cache directories
+__pycache__/

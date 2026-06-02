@@ -152,10 +152,6 @@ APP_TEMPLATE = """
                         <div class="label">Registered users</div>
                         <div class="value" id="registeredCount">{{ registered_count }}</div>
                     </div>
-                    <div class="stat">
-                        <div class="label">Attendance log</div>
-                        <div class="value" id="logCount">{{ log_count }} entries</div>
-                    </div>
                 </div>
             </section>
         </div>
@@ -171,17 +167,17 @@ APP_TEMPLATE = """
         <div class="grid">
             <section class="card">
                 <h2>Register User</h2>
-                <p class="muted" style="margin: 8px 0 16px;">Capture a face from the live RTSP feed and save the embedding plus cropped photo.</p>
+                <p class="muted" style="margin: 8px 0 16px;">Capture a face from the live RTSP feed and store the embedding plus cropped photo in the database.</p>
                 <form method="post" action="{{ url_for('register_user_route') }}">
                     <label>Name
                         <input type="text" name="name" required value="{{ selected_name or '' }}">
                     </label>
-                    <label>Entry No
+                    <label>Kerberos ID
                         <input type="text" name="entry_no" required value="{{ selected_entry_no or suggested_entry_no }}">
                     </label>
                     <label style="display:flex; align-items:center; gap:10px; color: var(--text);">
                         <input type="checkbox" name="overwrite" value="1" checked>
-                        Overwrite existing entry if found
+                        Allow another face sample for an existing entry
                     </label>
                     <div class="row">
                         <button class="btn" type="submit">Start registration</button>
@@ -191,9 +187,9 @@ APP_TEMPLATE = """
 
             <section class="card">
                 <h2>Show Registered Face</h2>
-                <p class="muted" style="margin: 8px 0 16px;">Find and preview the saved cropped face image for an entry number.</p>
+                <p class="muted" style="margin: 8px 0 16px;">Find and preview the saved cropped face image for a Kerberos ID.</p>
                 <form method="get" action="{{ url_for('show_user_route') }}">
-                    <label>Entry No
+                    <label>Kerberos ID
                         <input type="text" name="entry_no" required>
                     </label>
                     <div class="row">
@@ -220,33 +216,6 @@ APP_TEMPLATE = """
             </section>
         </div>
 
-        <div class="grid">
-            <section class="card">
-                <h2>Registered People</h2>
-                <div class="list" style="margin-top: 14px;">
-                    {% for entry_no, data in registered_faces %}
-                        <div class="list-item">
-                            <strong>{{ data['name'] }}</strong>
-                            <div class="muted">{{ entry_no }}</div>
-                        </div>
-                    {% else %}
-                        <div class="list-item muted">No registered users yet.</div>
-                    {% endfor %}
-                </div>
-            </section>
-
-            <section class="card">
-                <h2>Recent Attendance Log</h2>
-                <div class="list" id="logList" style="margin-top: 14px;">
-                    {% for line in log_lines %}
-                        <div class="list-item">{{ line }}</div>
-                    {% else %}
-                        <div class="list-item muted">No attendance entries yet.</div>
-                    {% endfor %}
-                </div>
-            </section>
-        </div>
-
         <div class="footer-note">Pipeline state is preserved in <a href="{{ url_for('index') }}">this dashboard</a>. Recognition is kept running automatically once the app is up.</div>
     </div>
     <script>
@@ -254,33 +223,10 @@ APP_TEMPLATE = """
             const feed = document.getElementById('liveFeed');
             const feedUrl = {{ url_for('camera_snapshot')|tojson }};
             const statusUrl = {{ url_for('status')|tojson }};
-            const logList = document.getElementById('logList');
-            const logCount = document.getElementById('logCount');
             const registeredCount = document.getElementById('registeredCount');
             const attendanceBanner = document.getElementById('attendanceBanner');
             let attendanceBannerTimer = null;
             let lastAttendanceEventId = null;
-
-            function renderLogLines(lines) {
-                if (!logList) return;
-                const items = Array.isArray(lines) ? lines.slice().reverse() : [];
-                if (!items.length) {
-                    logList.replaceChildren();
-                    const emptyItem = document.createElement('div');
-                    emptyItem.className = 'list-item muted';
-                    emptyItem.textContent = 'No attendance entries yet.';
-                    logList.appendChild(emptyItem);
-                    return;
-                }
-                const fragment = document.createDocumentFragment();
-                items.forEach((line) => {
-                    const entry = document.createElement('div');
-                    entry.className = 'list-item';
-                    entry.textContent = line;
-                    fragment.appendChild(entry);
-                });
-                logList.replaceChildren(fragment);
-            }
 
             function refreshFeed() {
                 if (!feed) return;
@@ -294,9 +240,6 @@ APP_TEMPLATE = """
                     const data = await response.json();
                     if (registeredCount) {
                         registeredCount.textContent = data.registered_users;
-                    }
-                    if (logCount) {
-                        logCount.textContent = `${data.recent_log_lines.length} entries`;
                     }
                     if (attendanceBanner) {
                         const attendanceEventId = data.last_attendance_event_id ?? null;
@@ -318,7 +261,6 @@ APP_TEMPLATE = """
                             attendanceBanner.style.display = 'none';
                         }
                     }
-                    renderLogLines(data.recent_log_lines);
                 } catch (error) {
                     // Keep the previous snapshot if the status request fails.
                 }

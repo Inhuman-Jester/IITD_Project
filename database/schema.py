@@ -1,5 +1,4 @@
 import os
-import psycopg
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
@@ -49,11 +48,25 @@ def init_db():
             UNIQUE (student_id, attendance_date)
     );
 
+    CREATE TABLE IF NOT EXISTS test_students (
+        id SERIAL PRIMARY KEY,
+        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        face_image BYTEA,
+        embedding VECTOR(512) NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS test_students_attendance (
+        id SERIAL PRIMARY KEY,  
+        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        face_image BYTEA,
+        embedding VECTOR(512) NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS student_faces_hnsw_idx
     ON student_faces USING hnsw (embedding vector_cosine_ops);
 
     CREATE INDEX IF NOT EXISTS student_faces_student_id_idx
-    ON student_faces (student_id);
+    ON student_faces (student_id);  
     """
 
     with pool.connection() as conn:

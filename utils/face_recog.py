@@ -361,6 +361,18 @@ class AttendanceSystem:
 
         self._set_message(f"No saved photo found for {kerberos_id}.")
         return None
+    
+    def update_test_db_with_recognition_result(self, embedding_vector, kerberos_id):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO test_students_attendance (student_id, face_image, embedding)
+                    VALUES (%s, NULL, %s::vector);
+                    """,
+                    (kerberos_id, embedding_vector),
+                )
+            conn.commit()
 
     def mark_attendance(self, kerberos_id, name, similarity, time_taken):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -470,6 +482,7 @@ class AttendanceSystem:
                         student_name, kerberos_id, min_distance = result
                         best_match_entry = kerberos_id
                         highest_sim = max(0.0, 1.0 - float(min_distance))
+                        self.update_test_db_with_recognition_result(embedding_vector, kerberos_id)
                     
                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 

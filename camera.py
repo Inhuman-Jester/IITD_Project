@@ -29,7 +29,7 @@ RTSP_URL = f"rtsp://admin:SOumil%40%40btp1@{HOST}:554/video/live?channel=1&subty
 SCREENSHOT_DIR = "screenshots"
 
 KEY_SCREENSHOT = ord("p")
-KEY_QUIT = ord("q")
+KEY_QUIT = ord("e")
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -90,7 +90,7 @@ def main():
 
     print("\nControls:")
     print("  P        -> Save screenshot")
-    print("  Q        -> Quit\n")
+    print("  E        -> Exit\n")
 
     try:
         while True:
@@ -102,7 +102,7 @@ def main():
 
 
             overlay_lines = [
-                "P: Screenshot  Q: Quit",
+                "P: Screenshot  E: Exit",
             ]
             frame = draw_overlay(frame, overlay_lines)
 

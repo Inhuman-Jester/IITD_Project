@@ -12,6 +12,8 @@ from urllib.parse import quote, unquote
 
 load_dotenv()
 
+print("ESP_IP =", repr(os.getenv("ESP32_IP")))
+
 ESP32_IP = os.getenv("ESP32_IP")
 ESP32_PORT = 4210
 LOG_FILE = "attendance_log.txt"
@@ -26,6 +28,7 @@ RTSP_URL = (
 RECOGNITION_THRESHOLD = 0.65
 REG_VERIFICATION_THRESHOLD = 0.65
 FACES_DIR = "registered_faces"
+CAPTURE_WINDOW_BINS = 10
 
 
 class ESPDisplay:
@@ -39,6 +42,12 @@ class ESPDisplay:
         message = f"{status}:{name}"
         self.sock.sendto(bytes(message, "utf-8"), (self.ip, self.port))
         print(f"UDP Sent to ESP32: {message}")
+    
+    def registering_user(self, name, kerberos_id, message=None):
+        if message is None:
+            message = f"REGISTERING:{kerberos_id}:{name}"
+        self.sock.sendto(bytes(message, "utf-8"), (self.ip, self.port))
+        print(f"UDP Sent to ESP32: {message}")
 
 
 class AttendanceSystem:
@@ -46,6 +55,7 @@ class AttendanceSystem:
     def __init__(self):
         self.db = pool
         self.ui = ESPDisplay(ip=ESP32_IP, port=ESP32_PORT)
+        print(f"LCD IP : {ESP32_IP}")
         self.log_file = LOG_FILE
         self._face_lock = threading.Lock()
         self._recognition_lock = threading.Lock()
@@ -77,16 +87,13 @@ class AttendanceSystem:
 
     def _set_message(self, message):
         self._last_message = message
-        # print(message)
+        print(message)
 
-    def _capture_best_face(self, fetcher, window_seconds=None):
+    def _capture_best_face(self, fetcher, window_seconds=None, bin_number = None):
         start_time = time.time()
         best_face = None
         best_frame = None
         highest_det_score = 0.0
-
-        if window_seconds is None:
-            window_seconds = REG_CAPTURE_WINDOW
 
         while time.time() - start_time < window_seconds:
             ret, frame = fetcher.get_frame()
@@ -124,8 +131,7 @@ class AttendanceSystem:
                 rows = cur.fetchall()
         return {kerberos_id: {"name": student_name} for kerberos_id, student_name in rows}
 
-    def get_registered_photo(self, kerberos_id):
-        kerberos_id = (kerberos_id or "").strip()
+    def get_registered_photo(self, kerberos_id = None):
         if not kerberos_id:
             return None
 
@@ -149,6 +155,28 @@ class AttendanceSystem:
 
         student_name, face_image, sample_number = row
         return student_name, bytes(face_image), sample_number
+    
+    def get_student(self, kerberos_id):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT kerberos_id, student_name
+                    FROM students
+                    WHERE kerberos_id = %s
+                    """,
+                    (kerberos_id,)
+                )
+
+                row = cur.fetchone()
+
+                if not row:
+                    return None
+
+                return {
+                    "kerberos_id": row[0],
+                    "name": row[1]
+                }
 
     def register_user(self, name, kerberos_id, overwrite=True):
         kerberos_id = (kerberos_id or "").strip()
@@ -162,47 +190,68 @@ class AttendanceSystem:
             self._set_message(f"{kerberos_id} already exists. Update cancelled.")
             return False
 
-        fetcher = FrameFetcher(RTSP_URL)
-        first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+        # Commented two step capture
+        # fetcher = FrameFetcher(RTSP_URL)
+        # first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
 
-        if not first_face or first_score <= RECOGNITION_THRESHOLD:
-            fetcher.stop()
-            self._set_message("Failed to capture a clear face. Please try again.")
-            return False
+        # if not first_face or first_score <= RECOGNITION_THRESHOLD:
+        #     fetcher.stop()
+        #     self._set_message("Failed to capture a clear face. Please try again.")
+        #     return False
         
-        self._set_message("First capture saved. Hold still for a second verification capture.")
-        second_face, second_frame, second_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
-        fetcher.stop()
+        # self._set_message("First capture saved. Hold still for a second verification capture.")
+        # second_face, second_frame, second_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+        # fetcher.stop()
 
-        if not second_face or second_score <= RECOGNITION_THRESHOLD:
-            self._set_message("Failed to capture a clear verification face. Please try again.")
-            return False
+        # if not second_face or second_score <= RECOGNITION_THRESHOLD:
+        #     self._set_message("Failed to capture a clear verification face. Please try again.")
+        #     return False
 
-        verification_sim = self.cosine_similarity(first_face.normed_embedding, second_face.normed_embedding)
-        self._set_message(f"Verification similarity: {verification_sim:.4f}")
+        # verification_sim = self.cosine_similarity(first_face.normed_embedding, second_face.normed_embedding)
+        # self._set_message(f"Verification similarity: {verification_sim:.4f}")
 
-        threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
-        if verification_sim < threshold:
-            self._set_message("Second verification did not match the first capture. Registration cancelled.")
-            return False
+        # threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
+        # if verification_sim < threshold:
+        #     self._set_message("Second verification did not match the first capture. Registration cancelled.")
+        #     return False
+        sample = 1
+        while sample <= 10:  # allow up to 10 captures within the window to find a good face
+            fetcher = FrameFetcher(RTSP_URL)
+            face, frame, score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW, bin_number=CAPTURE_WINDOW_BINS)
+            fetcher.stop()
 
+            x1, y1, x2, y2 = [int(v) for v in face.bbox]
+            h, w = frame.shape[:2]
+            face_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+            if face_crop.size == 0:
+                self._set_message("Captured face was invalid. Please try again.")
+                return False
 
-        x1, y1, x2, y2 = [int(v) for v in first_face.bbox]
-        h, w = first_frame.shape[:2]
-        face_crop = first_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-        if face_crop.size == 0:
-            self._set_message("Captured face was invalid. Please try again.")
-            return False
+            success, encoded_image = cv2.imencode(".jpg", face_crop)
+            if not success:
+                self._set_message("Failed to encode captured face. Please try again.")
+                return False
 
-        success, encoded_image = cv2.imencode(".jpg", face_crop)
-        if not success:
-            self._set_message("Failed to encode captured face. Please try again.")
-            return False
+            embedding = face.normed_embedding.tolist()
+            vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
+            face_image = encoded_image.tobytes()
 
-        embedding = first_face.normed_embedding.tolist()
-        vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
-        face_image = encoded_image.tobytes()
+            if sample <= 3:
+                check = self.register_main_db(kerberos_id, exists_already, name, face_image, vector_literal)
+                if(not check):
+                    return False
+            else:
+                self.register_to_test_db(kerberos_id, exists_already, name, face_image, vector_literal)
 
+            self.ui.registering_user(name, kerberos_id, message=f"Sample:{sample}")
+            
+            print(f"Captured sample {sample} for {kerberos_id} with detection score {score:.4f}")
+            sample+=1
+                
+        
+        return True
+    
+    def register_main_db(self, kerberos_id, exists_already, name, face_image, vector_literal):
         with self.db.connection() as conn:
             with conn.cursor() as cur:
                 if exists_already:
@@ -239,6 +288,8 @@ class AttendanceSystem:
                         """
                         INSERT INTO students (student_name, kerberos_id)
                         VALUES (%s, %s)
+                        ON CONFLICT (kerberos_id)
+                        DO UPDATE SET student_name = EXCLUDED.student_name
                         RETURNING id;
                         """,
                         (name, kerberos_id),
@@ -275,6 +326,20 @@ class AttendanceSystem:
             conn.commit()
 
         self._set_message(f"Successfully registered {name} ({kerberos_id}) with face sample {sample_number}/3.")
+        return True
+
+    def register_to_test_db(self, kerberos_id, exists_already, name, face_image, vector_literal):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO test_students (student_id, face_image, embedding)
+                    VALUES (%s, %s, %s::vector);
+                    """,
+                    (kerberos_id, face_image, vector_literal),
+                )
+            conn.commit()
+        self._set_message(f"Successfully registered {name} ({kerberos_id}) to test DB.")
         return True
 
     def show_user(self, kerberos_id):
@@ -328,7 +393,7 @@ class AttendanceSystem:
         self._last_attendance_event_id += 1
         self._last_attendance_message = f"Attendance marked for {kerberos_id} - {name} at {timestamp}"
         self._set_message(self._last_attendance_message)
-        self.ui.display_attendance("SUCCESS", name)
+        self.ui.display_attendance("MARKED", name)
         print(self._last_attendance_message)
 
     def _recognition_loop(self):

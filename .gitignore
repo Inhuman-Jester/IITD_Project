@@ -268,3 +268,6 @@ pyrightconfig.json
 
 # Python cache directories
 __pycache__/
+
+#no log files
+attendance_log.txt

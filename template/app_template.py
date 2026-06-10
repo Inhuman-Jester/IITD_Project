@@ -170,14 +170,22 @@ APP_TEMPLATE = """
                 <p class="muted" style="margin: 8px 0 16px;">Capture a face from the live RTSP feed and store the embedding plus cropped photo in the database.</p>
                 <form method="post" action="{{ url_for('register_user_route') }}">
                     <label>Name
-                        <input type="text" name="name" required value="{{ selected_name or '' }}">
+                        <input
+                            type="text"
+                            name="name"
+                            id="name"
+                            required
+                            value="{{ selected_name or '' }}"
+                        >
                     </label>
                     <label>Kerberos ID
-                        <input type="text" name="entry_no" required value="{{ selected_entry_no or suggested_entry_no }}">
-                    </label>
-                    <label style="display:flex; align-items:center; gap:10px; color: var(--text);">
-                        <input type="checkbox" name="overwrite" value="1" checked>
-                        Allow another face sample for an existing entry
+                        <input
+                            type="text"
+                            name="entry_no"
+                            id="entry_no"
+                            required
+                            value="{{ selected_entry_no or suggested_entry_no }}"
+                        >
                     </label>
                     <div class="row">
                         <button class="btn" type="submit">Start registration</button>
@@ -228,6 +236,13 @@ APP_TEMPLATE = """
             let attendanceBannerTimer = null;
             let lastAttendanceEventId = null;
 
+            const studentLookupUrl = "/student/";
+            const kerberosInput = document.getElementById('entry_no');
+            const nameInput = document.getElementById('name');
+
+            console.log("kerberosInput =", kerberosInput);
+            console.log("nameInput =", nameInput);
+
             function refreshFeed() {
                 if (!feed) return;
                 feed.src = feedUrl + '?t=' + Date.now();
@@ -272,6 +287,41 @@ APP_TEMPLATE = """
             feed.addEventListener('error', function () {
                 setTimeout(refreshFeed, 1000);
             });
+
+            if (kerberosInput && nameInput) {
+                let lookupTimer = null;
+
+                kerberosInput.addEventListener('input', function () {
+                    clearTimeout(lookupTimer);
+
+                    lookupTimer = setTimeout(async () => {
+                        const kerberos = kerberosInput.value.trim();
+
+                        if (!kerberos) {
+                            nameInput.value = '';
+                            return;
+                        }
+
+                        try {
+                            const response = await fetch(
+                                studentLookupUrl + encodeURIComponent(kerberos)
+                            );
+
+                            if (!response.ok) {
+                                return;
+                            }
+
+                            const data = await response.json();
+
+                            if (data.found) {
+                                nameInput.value = data.name;
+                            }
+                        } catch (err) {
+                            console.error(err);
+                        }
+                    }, 300);
+                });
+            }
         }());
     </script>
 </body>

@@ -27,12 +27,16 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from insightface.app import FaceAnalysis
 import threading
-from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, url_for, Response
+from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, url_for, Response, jsonify
 import logging
 from template.app_template import APP_TEMPLATE
 from database.schema import init_db
 from utils.face_recog import AttendanceSystem
 from utils.frame import FrameFetcher
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -493,7 +497,10 @@ def create_flask_app(system: AttendanceSystem):
         all_users = system.get_all()
         if selected_entry_no and system.exists(selected_entry_no):
             selected_name = all_users[selected_entry_no]["name"]
-            face_exists = os.path.exists(os.path.join(FACES_DIR, f"{selected_entry_no}.jpg"))
+            photo_record = system.get_registered_photo(selected_entry_no)
+            face_exists = (
+                system.get_registered_photo(selected_entry_no) is not None
+            )
         else:
             selected_name = name_arg
 
@@ -609,6 +616,20 @@ def create_flask_app(system: AttendanceSystem):
         response.headers['Expires'] = '0'
         return response
 
+    @flask_app.route("/student/<kerberos_id>")
+    def get_student_route(kerberos_id):
+        student = system.get_student(kerberos_id)
+
+        if student is None:
+            return jsonify({
+                "found": False
+            })
+
+        return jsonify({
+            "found": True,
+            "name": student["name"]
+        })
+    
     return flask_app
 
 

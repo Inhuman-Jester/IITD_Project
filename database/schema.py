@@ -51,15 +51,14 @@ def init_db():
     CREATE TABLE IF NOT EXISTS test_students (
         id SERIAL PRIMARY KEY,
         student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-        face_image BYTEA,
-        embedding VECTOR(512) NOT NULL
-    );
+        embedding VECTOR(512) NOT NULL,
+        det_score REAL NOT NULL,
+        sample_number SMALLINT NOT NULL,
+        data_point_number SMALLINT NOT NULL,
 
-    CREATE TABLE IF NOT EXISTS test_students_attendance (
-        id SERIAL PRIMARY KEY,  
-        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-        face_image BYTEA,
-        embedding VECTOR(512) NOT NULL
+        CONSTRAINT unique_test_student_sample
+            UNIQUE (student_id, sample_number, data_point_number)
+
     );
 
     CREATE INDEX IF NOT EXISTS student_faces_hnsw_idx

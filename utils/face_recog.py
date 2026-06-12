@@ -361,18 +361,6 @@ class AttendanceSystem:
 
         self._set_message(f"No saved photo found for {kerberos_id}.")
         return None
-    
-    def update_test_db_with_recognition_result(self, embedding_vector, kerberos_id):
-        with self.db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO test_students_attendance (student_id, face_image, embedding)
-                    VALUES (%s, NULL, %s::vector);
-                    """,
-                    (kerberos_id, embedding_vector),
-                )
-            conn.commit()
 
     def mark_attendance(self, kerberos_id, name, similarity, time_taken):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -407,6 +395,145 @@ class AttendanceSystem:
         self._set_message(self._last_attendance_message)
         self.ui.display_attendance("MARKED", name)
         print(self._last_attendance_message)
+
+    def recognition_loop_test(self):
+        print("Starting recognition loop test...")
+        fetcher = FrameFetcher(RTSP_URL)
+        self._recognition_status = "starting"
+        self._set_message("Starting recognition loop test.")
+        self._set_message("[Test] Waiting for first frame...")
+        
+        ok, _ = fetcher.get_frame(timeout=15.0)
+        if not ok:
+            self._set_message("[Main] Timed out waiting for camera. Check RTSP URL.")
+            fetcher.stop()
+            self._recognition_status = "stopped"
+            return
+        self._set_message("[Main] Camera ready. Starting inference loop.")
+        self._recognition_status = "running"
+
+        recently_marked = {}
+        cooldown_period = 30
+        collection_cache = {}   
+        cache_lock = threading.Lock()
+
+        try:
+            while not self._recognition_stop_event.is_set():
+                start_time = time.time()
+                ret, frame = fetcher.get_frame(timeout=1.0)
+                if not ret:
+                    if self._recognition_stop_event.is_set():
+                        break
+                    self._set_message("[Main] No frame available yet...")
+                    time.sleep(0.1)
+                    continue
+
+                with self._face_lock:
+                    faces = self.app.get(frame)
+                if not faces:
+                    continue
+
+                for face in faces:
+                    embedding = face.normed_embedding.tolist()
+                    embedding_vector = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+
+                    best_match_entry = None
+                    highest_sim = 0.0
+
+                    result = None
+                    with self.db.connection() as conn:
+                        with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
+                                    FROM student_faces f
+                                    JOIN students s ON f.student_id = s.id
+                                    GROUP BY s.id, s.student_name, s.kerberos_id
+                                    HAVING MIN(f.embedding <=> %s::vector) <= %s
+                                    ORDER BY min_distance ASC
+                                    LIMIT 1;
+                                """, (embedding_vector, embedding_vector, 1-RECOGNITION_THRESHOLD))
+
+                                result = cur.fetchone()
+                            
+                    if result:
+                        student_name, kerberos_id, min_distance = result
+                        best_match_entry = kerberos_id
+                        highest_sim = max(0.0, 1.0 - float(min_distance))
+
+                    if not best_match_entry:
+                        continue
+                    
+                    with cache_lock:
+                        current_time = time.time()
+                        if best_match_entry not in collection_cache:
+                            collection_cache[best_match_entry] = {
+                                'samples' : [],
+                                'last_updated': 0.0
+                            }
+
+                        student_data = collection_cache[best_match_entry]
+                        
+                        if current_time - student_data['last_updated'] > 1:
+
+                            new_sample = {
+                                'embedding': embedding_vector,
+                                'detection_score': face.det_score,
+                                'name': student_name
+                            }
+                            student_data['samples'].append(new_sample)
+                            student_data['last_updated'] = current_time
+
+                            if(len(student_data['samples']) == 3):
+                                data = collection_cache.pop(best_match_entry)
+
+                                threading.Thread(
+                                    target=self._insert_samples_to_db, 
+                                    args=(best_match_entry, data['samples']),
+                                    daemon=True
+                                ).start()
+        
+                    self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
+
+                    current_time = time.time()
+                    if best_match_entry not in recently_marked or \
+                        (current_time - recently_marked[best_match_entry]) > cooldown_period:
+                        end_time = time.time()
+                        self.mark_attendance(best_match_entry, student_name, highest_sim, end_time - start_time)
+                        recently_marked[best_match_entry] = current_time
+
+        except KeyboardInterrupt:
+            self._set_message("Shutting down gracefully...")
+        finally:
+            fetcher.stop()
+            self._recognition_status = "stopped"
+        
+    def _insert_samples_to_db(self, kerberos_id, samples):
+        with self.db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COALESCE(MAX(data_point_number), 0) + 1 
+                    FROM test_students 
+                    WHERE student_id = %s;
+                """,
+                (kerberos_id,)
+                )
+                result = cur.fetchone()
+                data_point_number = result[0] if result else 1
+
+                for sample_number in range(len(samples)):
+                    sample = samples[sample_number]
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO test_students (student_id, embedding, det_score, sample_number, data_point_number)
+                            VALUES (%s, %s::vector, %s, %s, %s);
+                            """,
+                            (kerberos_id, sample['embedding'], sample['detection_score'], sample_number, data_point_number),
+                        )
+                    except Exception as e:
+                        print(f"Failed to insert sample for {kerberos_id}: {e}")
+            conn.commit()
+        print(f"Inserted {len(samples)} samples for {kerberos_id} into test DB.")
 
     def _recognition_loop(self):
         print("Starting recognition loop...")
@@ -482,7 +609,6 @@ class AttendanceSystem:
                         student_name, kerberos_id, min_distance = result
                         best_match_entry = kerberos_id
                         highest_sim = max(0.0, 1.0 - float(min_distance))
-                        self.update_test_db_with_recognition_result(embedding_vector, kerberos_id)
                     
                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 
@@ -508,7 +634,7 @@ class AttendanceSystem:
                 return False, "Recognition is already running."
 
             self._recognition_stop_event.clear()
-            self._recognition_thread = threading.Thread(target=self._recognition_loop, daemon=True, name="RecognitionLoop")
+            self._recognition_thread = threading.Thread(target=self.recognition_loop_test, daemon=True, name="RecognitionLoop")
             self._recognition_thread.start()
             return True, "Recognition started."
 

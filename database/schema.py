@@ -23,7 +23,7 @@ def init_db():
 
     CREATE TABLE IF NOT EXISTS student_faces (
         id SERIAL PRIMARY KEY,
-        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        kerberos_id VARCHAR(20) NOT NULL REFERENCES students(kerberos_id) ON DELETE CASCADE,
         sample_number SMALLINT NOT NULL,
         face_image BYTEA,
         embedding VECTOR(512) NOT NULL,
@@ -33,39 +33,39 @@ def init_db():
             CHECK (sample_number BETWEEN 1 AND 3),
 
         CONSTRAINT unique_student_face_sample
-            UNIQUE (student_id, sample_number)
+            UNIQUE (kerberos_id, sample_number)
     );
 
     CREATE TABLE IF NOT EXISTS attendance_records (
         id SERIAL PRIMARY KEY,
-        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        kerberos_id VARCHAR(20) NOT NULL REFERENCES students(kerberos_id) ON DELETE CASCADE,
         attendance_date DATE NOT NULL DEFAULT CURRENT_DATE,
         attendance_time TIMESTAMP NOT NULL DEFAULT NOW(),
         similarity REAL NOT NULL,
         time_taken REAL NOT NULL,
 
         CONSTRAINT unique_student_attendance_per_day
-            UNIQUE (student_id, attendance_date)
+            UNIQUE (kerberos_id, attendance_date)
     );
 
     CREATE TABLE IF NOT EXISTS test_students (
         id SERIAL PRIMARY KEY,
-        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        kerberos_id VARCHAR(20) NOT NULL REFERENCES students(kerberos_id) ON DELETE CASCADE,
         embedding VECTOR(512) NOT NULL,
         det_score REAL NOT NULL,
         sample_number SMALLINT NOT NULL,
         data_point_number SMALLINT NOT NULL,
 
         CONSTRAINT unique_test_student_sample
-            UNIQUE (student_id, sample_number, data_point_number)
+            UNIQUE (kerberos_id, sample_number, data_point_number)
 
     );
 
     CREATE INDEX IF NOT EXISTS student_faces_hnsw_idx
     ON student_faces USING hnsw (embedding vector_cosine_ops);
 
-    CREATE INDEX IF NOT EXISTS student_faces_student_id_idx
-    ON student_faces (student_id);  
+    CREATE INDEX IF NOT EXISTS student_faces_kerberos_id_idx
+    ON student_faces (kerberos_id);  
     """
 
     with pool.connection() as conn:

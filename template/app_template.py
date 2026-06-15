@@ -248,6 +248,8 @@ APP_TEMPLATE = """
                 feed.src = feedUrl + '?t=' + Date.now();
             }
 
+            let localProcessedEvents = new Set();
+
             async function refreshStatus() {
                 try {
                     const response = await fetch(statusUrl + '?t=' + Date.now(), { cache: 'no-store' });
@@ -256,28 +258,26 @@ APP_TEMPLATE = """
                     if (registeredCount) {
                         registeredCount.textContent = data.registered_users;
                     }
-                    if (attendanceBanner) {
-                        const attendanceEventId = data.last_attendance_event_id ?? null;
-                        const attendanceMessage = data.last_attendance_message || '';
-                        if (attendanceMessage && attendanceEventId !== null && attendanceEventId !== lastAttendanceEventId) {
-                            lastAttendanceEventId = attendanceEventId;
-                            attendanceBanner.textContent = attendanceMessage;
-                            attendanceBanner.style.display = 'block';
-                            if (attendanceBannerTimer) {
-                                clearTimeout(attendanceBannerTimer);
-                            }
-                            attendanceBannerTimer = setTimeout(() => {
-                                attendanceBanner.textContent = '';
-                                attendanceBanner.style.display = 'none';
-                                attendanceBannerTimer = null;
-                            }, 5000);
-                        } else {
-                            attendanceBanner.textContent = '';
-                            attendanceBanner.style.display = 'none';
-                        }
+                    const attendanceEventId = data.last_attendance_event_id ?? null;
+                    const attendanceMessage = data.last_attendance_message || '';
+
+                    if (attendanceEventId && !localProcessedEvents.has(attendanceEventId)) {
+                        localProcessedEvents.add(attendanceEventId);
+                        const userConfirmed = confirm(`${attendanceMessage}\n\nIs this correct?`);
+
+                        await fetch('/confirm-attendance', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                event_id: attendanceEventId,
+                                confirmed: userConfirmed // true or false
+                            })
+                        });
                     }
                 } catch (error) {
-                    // Keep the previous snapshot if the status request fails.
+                    console.error('Error fetching status:', error);
                 }
             }
 

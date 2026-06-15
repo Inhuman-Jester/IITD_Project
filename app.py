@@ -292,10 +292,36 @@ def create_flask_app(system: AttendanceSystem):
             "found": True,
             "name": student["name"]
         })
-    
+
+    @flask_app.route("/confirm-attendance", methods=["POST"])
+    def confirm_attendance():
+        data = request.get_json() or {}
+        event_id = data.get("event_id")
+        confirmed = data.get("confirmed", False)
+
+        if not event_id:
+            return jsonify({"status": "error", "message": "Missing event ID"}), 400
+
+        # Pop the data straight out of the system object memory space
+        pending_data = system.pending_confirmation.pop(event_id, None)
+        
+        if not pending_data:
+            return jsonify({"status": "error", "message": "Event expired or already processed"}), 404
+
+        if confirmed:
+            # Spawn the database worker using the method in your system class
+            threading.Thread(
+                target=system._insert_samples_to_db, 
+                args=(pending_data['kerberos_id'], pending_data['samples']),
+                daemon=True
+            ).start()
+            
+            return jsonify({"status": "success", "message": "Attendance saved."})
+        else:
+            return jsonify({"status": "ignored", "message": "Attendance discarded."})
+        
     return flask_app
-
-
+    
 if __name__ == "__main__":
     init_db()
     system = AttendanceSystem()

@@ -17,7 +17,7 @@ print("ESP_IP =", repr(os.getenv("ESP32_IP")))
 ESP32_IP = os.getenv("ESP32_IP")
 ESP32_PORT = 4210
 LOG_FILE = "attendance_log.txt"
-REG_CAPTURE_WINDOW = 2
+REG_CAPTURE_WINDOW = 1
 CAM_IP = os.getenv("CAM_IP", "10.208.22.128")
 CAM_USER = os.getenv("CAM_USER", "admin")
 CAM_PASSWORD = os.getenv("CAM_PASSWORD", "SOumil@@btp1")
@@ -65,6 +65,7 @@ class AttendanceSystem:
         self._last_message = ""
         self._last_attendance_message = ""
         self._last_attendance_event_id = 0
+        self.pending_confirmation = {}
 
         print("Initializing ArcFace...")
         self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
@@ -89,7 +90,7 @@ class AttendanceSystem:
         self._last_message = message
         print(message)
 
-    def _capture_best_face(self, fetcher, window_seconds=None, bin_number = None):
+    def _capture_best_face(self, fetcher, window_seconds=None):
         start_time = time.time()
         best_face = None
         best_frame = None
@@ -141,7 +142,7 @@ class AttendanceSystem:
                     """
                     SELECT s.student_name, f.face_image, f.sample_number
                     FROM students s
-                    JOIN student_faces f ON f.student_id = s.id
+                    JOIN student_faces f ON f.kerberos_id = s.kerberos_id
                     WHERE s.kerberos_id = %s AND f.face_image IS NOT NULL
                     ORDER BY f.sample_number DESC, f.id DESC
                     LIMIT 1;
@@ -185,11 +186,6 @@ class AttendanceSystem:
             self._set_message("Name and Kerberos ID are required.")
             return False
 
-        exists_already = self.exists(kerberos_id)
-        if exists_already and not overwrite:
-            self._set_message(f"{kerberos_id} already exists. Update cancelled.")
-            return False
-
         # Commented two step capture
         # fetcher = FrameFetcher(RTSP_URL)
         # first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
@@ -214,10 +210,28 @@ class AttendanceSystem:
         # if verification_sim < threshold:
         #     self._set_message("Second verification did not match the first capture. Registration cancelled.")
         #     return False
+        # x1, y1, x2, y2 = [int(v) for v in first_face.bbox]
+        # h, w = first_frame.shape[:2]
+        # face_crop = first_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        # if face_crop.size == 0:
+        #     self._set_message("Captured face was invalid. Please try again.")
+        #     return False
+
+        # success, encoded_image = cv2.imencode(".jpg", face_crop)
+        # if not success:
+        #     self._set_message("Failed to encode captured face. Please try again.")
+        #     return False
+
+        # embedding = first_face.normed_embedding.tolist()
+        # vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
+        # face_image = encoded_image.tobytes()
+
+        # self.register_main_db(kerberos_id, self.exists(kerberos_id), name, face_image, vector_literal)
+        
         sample = 1
-        while sample <= 10:  # allow up to 10 captures within the window to find a good face
+        while sample <= 3:  # allow up to 3 captures within the window to find a good face
             fetcher = FrameFetcher(RTSP_URL)
-            face, frame, score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW, bin_number=CAPTURE_WINDOW_BINS)
+            face, frame, score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
             fetcher.stop()
 
             x1, y1, x2, y2 = [int(v) for v in face.bbox]
@@ -237,11 +251,9 @@ class AttendanceSystem:
             face_image = encoded_image.tobytes()
 
             if sample <= 3:
-                check = self.register_main_db(kerberos_id, exists_already, name, face_image, vector_literal)
+                check = self.register_main_db(kerberos_id, name, face_image, vector_literal)
                 if(not check):
                     return False
-            else:
-                self.register_to_test_db(kerberos_id, exists_already, name, face_image, vector_literal)
 
             self.ui.registering_user(name, kerberos_id, message=f"Sample:{sample}")
             
@@ -251,64 +263,47 @@ class AttendanceSystem:
         
         return True
     
-    def register_main_db(self, kerberos_id, exists_already, name, face_image, vector_literal):
-        with self.db.connection() as conn:
-            with conn.cursor() as cur:
-                if exists_already:
-                    cur.execute(
-                        "SELECT id FROM students WHERE kerberos_id = %s FOR UPDATE;",
-                        (kerberos_id,),
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        self._set_message(f"Kerberos ID {kerberos_id} not found in database.")
-                        return False
-
-                    student_id = row[0]
-                    # Count existing face samples while holding the student row lock
-                    cur.execute(
-                        "SELECT COUNT(*) FROM student_faces WHERE student_id = %s;",
-                        (student_id,),
-                    )
-                    face_count = cur.fetchone()[0]
-                    if face_count >= 3:
-                        self._set_message(f"{kerberos_id} already has 3 face samples. Add another face is blocked.")
-                        return False
-
-                    cur.execute(
-                        """
-                        UPDATE students
-                        SET student_name = %s
-                        WHERE id = %s;
-                        """,
-                        (name, student_id),
-                    )
-                else:
+    def register_main_db(self, kerberos_id, name, face_image, vector_literal):
+        try:
+            with self.db.connection() as conn:
+                with conn.cursor() as cur:
+                    # 1. Upsert/Get the student and immediately lock the row to block race conditions
                     cur.execute(
                         """
                         INSERT INTO students (student_name, kerberos_id)
-                        VALUES (%s, %s)
+                        VALUES (%s, %s) 
                         ON CONFLICT (kerberos_id)
                         DO UPDATE SET student_name = EXCLUDED.student_name
                         RETURNING id;
                         """,
                         (name, kerberos_id),
                     )
-
-                    student_id = cur.fetchone()[0]
-
+                    
+                    # Lock this specific student row for the duration of this transaction
                     cur.execute(
-                        "SELECT COUNT(*) FROM student_faces WHERE student_id = %s;",
-                        (student_id,),
+                        "SELECT id FROM students WHERE kerberos_id = %s FOR UPDATE;",
+                        (kerberos_id,),
+                    )
+                    
+                    # 2. Safely count existing face samples while holding the row lock
+                    cur.execute(
+                        "SELECT COUNT(*) FROM student_faces WHERE kerberos_id = %s;",
+                        (kerberos_id,),
                     )
                     face_count = cur.fetchone()[0]
+                    
+                    if face_count >= 3:
+                        print(f"Face count for {kerberos_id}: {face_count}")
+                        self._set_message(f"{kerberos_id} already has 3 face samples. Adding another face is blocked.")
+                        return False
 
-                sample_number = face_count + 1
-                try:
+                    sample_number = face_count + 1
+                    
+                    # 3. Insert the new face sample safely
                     cur.execute(
                         """
                         INSERT INTO student_faces (
-                            student_id,
+                            kerberos_id,
                             sample_number,
                             face_image,
                             embedding,
@@ -316,31 +311,19 @@ class AttendanceSystem:
                         )
                         VALUES (%s, %s, %s, %s::vector, NOW());
                         """,
-                        (student_id, sample_number, face_image, vector_literal),
+                        (kerberos_id, sample_number, face_image, vector_literal),
                     )
-                except Exception as e:
-                    # Handle unique constraint or other DB errors gracefully
-                    conn.rollback()
-                    self._set_message(f"Failed to store face sample: {e}")
-                    return False
-            conn.commit()
+                    
+                # The context manager automatically commits here if no exception occurred
+                
+            self._set_message(f"Successfully registered {name} ({kerberos_id}) with face sample {sample_number}/3.")
+            return True
 
-        self._set_message(f"Successfully registered {name} ({kerberos_id}) with face sample {sample_number}/3.")
-        return True
-
-    def register_to_test_db(self, kerberos_id, exists_already, name, face_image, vector_literal):
-        with self.db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO test_students (student_id, face_image, embedding)
-                    VALUES (%s, %s, %s::vector);
-                    """,
-                    (kerberos_id, face_image, vector_literal),
-                )
-            conn.commit()
-        self._set_message(f"Successfully registered {name} ({kerberos_id}) to test DB.")
-        return True
+        except Exception as e:
+            # Any exception inside the 'with' block automatically triggers a rollback.
+            # We catch it out here to log it cleanly without corrupting the transaction state.
+            self._set_message(f"Failed to store face sample: {e}")
+            return False
 
     def show_user(self, kerberos_id):
         kerberos_id = (kerberos_id or "").strip()
@@ -373,24 +356,24 @@ class AttendanceSystem:
                 cur.execute(
                     """
                     INSERT INTO attendance_records (
-                        student_id,
+                        kerberos_id,
                         attendance_date,
                         attendance_time,
                         similarity,
                         time_taken
                     )
-                    SELECT id, CURRENT_DATE, NOW(), %s, %s
+                    SELECT kerberos_id, CURRENT_DATE, NOW(), %s, %s
                     FROM students
                     WHERE kerberos_id = %s
                     LIMIT 1
-                    ON CONFLICT (student_id, attendance_date) DO NOTHING;
+                    ON CONFLICT (kerberos_id, attendance_date) DO NOTHING;
                     """,
                     (similarity, time_taken, kerberos_id),
                 )
                 if cur.rowcount > 0:
                     conn.commit()
 
-        self._last_attendance_event_id += 1
+        # self._last_attendance_event_id += 1
         self._last_attendance_message = f"Attendance marked for {kerberos_id} - {name} at {timestamp}"
         self._set_message(self._last_attendance_message)
         self.ui.display_attendance("MARKED", name)
@@ -446,7 +429,7 @@ class AttendanceSystem:
                                 cur.execute("""
                                     SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
                                     FROM student_faces f
-                                    JOIN students s ON f.student_id = s.id
+                                    JOIN students s ON f.kerberos_id = s.kerberos_id
                                     GROUP BY s.id, s.student_name, s.kerberos_id
                                     HAVING MIN(f.embedding <=> %s::vector) <= %s
                                     ORDER BY min_distance ASC
@@ -483,14 +466,20 @@ class AttendanceSystem:
                             student_data['samples'].append(new_sample)
                             student_data['last_updated'] = current_time
 
-                            if(len(student_data['samples']) == 3):
+                            if(len(student_data['samples']) == 15):
                                 data = collection_cache.pop(best_match_entry)
-
-                                threading.Thread(
-                                    target=self._insert_samples_to_db, 
-                                    args=(best_match_entry, data['samples']),
-                                    daemon=True
-                                ).start()
+                                event_id = str(int(time.time() * 1000))
+                
+                                # Push into the dictionary instance variable
+                                self.pending_confirmation[event_id] = {
+                                    'kerberos_id': best_match_entry,
+                                    'name': student_name,
+                                    'samples': data['samples']
+                                }
+                                
+                                # Update status properties
+                                self._last_attendance_event_id = event_id
+                                self._last_attendance_message = f"Is this {student_name} (ID: {best_match_entry})?"
         
                     self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 
@@ -513,7 +502,7 @@ class AttendanceSystem:
                 cur.execute("""
                     SELECT COALESCE(MAX(data_point_number), 0) + 1 
                     FROM test_students 
-                    WHERE student_id = %s;
+                    WHERE kerberos_id = %s;
                 """,
                 (kerberos_id,)
                 )
@@ -522,13 +511,14 @@ class AttendanceSystem:
 
                 for sample_number in range(len(samples)):
                     sample = samples[sample_number]
+
                     try:
                         cur.execute(
                             """
-                            INSERT INTO test_students (student_id, embedding, det_score, sample_number, data_point_number)
+                            INSERT INTO test_students (kerberos_id, embedding, det_score, sample_number, data_point_number)
                             VALUES (%s, %s::vector, %s, %s, %s);
                             """,
-                            (kerberos_id, sample['embedding'], sample['detection_score'], sample_number, data_point_number),
+                            (kerberos_id, sample['embedding'], sample['detection_score'], sample_number%3 + 1, data_point_number + sample_number//3),
                         )
                     except Exception as e:
                         print(f"Failed to insert sample for {kerberos_id}: {e}")
@@ -596,7 +586,7 @@ class AttendanceSystem:
                                 cur.execute("""
                                     SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
                                     FROM student_faces f
-                                    JOIN students s ON f.student_id = s.id
+                                    JOIN students s ON f.kerberos_id = s.kerberos_id
                                     GROUP BY s.id, s.student_name, s.kerberos_id
                                     HAVING MIN(f.embedding <=> %s::vector) <= %s
                                     ORDER BY min_distance ASC

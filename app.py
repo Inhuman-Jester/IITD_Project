@@ -46,8 +46,6 @@ FACES_DIR = "registered_faces"
 if FAS_DIR not in sys.path:
     sys.path.insert(0, FAS_DIR)
 
-from FAS.nets.utils import get_model
-
 # --- Configuration ---
 ESP32_IP = "10.194.17.254"
 ESP32_PORT = 4210
@@ -90,51 +88,6 @@ class FASPreprocessor:
         augmented = self.transform(image=face_rgb)
         tensor = augmented["image"]
         return tensor.unsqueeze(0)
-
-
-class AntiSpoofPredictor:
-    """Handles Face Anti-Spoofing Inference"""
-    def __init__(self, model_path, arch='resnet50', num_classes=2, device_id=0):
-        self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
-        print(f"Loading Anti-Spoofing model ({arch}) on {self.device}...")
-
-        self.model = get_model(arch, num_classes)
-        checkpoint = torch.load(model_path, map_location='cpu')
-
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        elif 'model' in checkpoint:
-            state_dict = checkpoint['model']
-        else:
-            state_dict = checkpoint
-
-        clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        self.model.load_state_dict(clean_state_dict, strict=True)
-        self.model.to(self.device)
-        self.model.eval()
-
-        self.preprocessor = FASPreprocessor(input_size=224, test_crop=False)
-
-    @torch.no_grad()
-    def predict(self, frame, bbox, threshold=0.5, class_index=1):
-        h_frame, w_frame = frame.shape[:2]
-        xmin = max(0, int(bbox[0]))
-        ymin = max(0, int(bbox[1]))
-        xmax = min(w_frame, int(bbox[2]))
-        ymax = min(h_frame, int(bbox[3]))
-
-        face_crop = frame[ymin:ymax, xmin:xmax]
-        if face_crop.size == 0:
-            return False
-
-        input_tensor = self.preprocessor(face_crop).to(self.device)
-        outputs = self.model(input_tensor)[1]
-        scores = torch.softmax(outputs, dim=1).cpu().numpy()[0]
-        spoof_score = scores[class_index]
-        print(f"Anti-Spoofing Score (spoof): {spoof_score:.4f}")
-        return bool(spoof_score > threshold)
-
-
 
 def create_flask_app(system: AttendanceSystem):
     flask_app = Flask(__name__)

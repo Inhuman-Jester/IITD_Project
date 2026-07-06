@@ -6,6 +6,7 @@ import cv2
 from database.schema import pool
 import numpy as np
 from insightface.app import FaceAnalysis
+from FAS.anti_spoofing import AntiSpoofing
 from utils.frame import FrameFetcher
 from dotenv import load_dotenv
 from urllib.parse import quote, unquote
@@ -379,6 +380,32 @@ class AttendanceSystem:
         self.ui.display_attendance("MARKED", name)
         print(self._last_attendance_message)
 
+    def capture_faces(self, fetcher):
+        frame_count = 0
+        faces = []
+
+        while len(faces) < 5  :
+            best_face = None
+            best_frame = None
+            highest_det_score = 0.0
+            ret, frame = fetcher.get_frame()
+            if not ret:
+                continue
+            with self._face_lock:
+                faces_extracted = self.app.get(frame)
+            if faces_extracted:
+                for face in faces_extracted:
+                    if face.det_score > highest_det_score and face.det_score > 0.7:
+                        highest_det_score = face.det_score
+                        best_face = face
+                        best_frame = frame
+            if best_face :
+                frame_count += 1
+                if frame_count % 3 == 0:
+                    faces.append([best_frame, best_face])
+        
+        return faces
+
     def recognition_loop_test(self):
         print("Starting recognition loop test...")
         fetcher = FrameFetcher(RTSP_URL)
@@ -416,79 +443,84 @@ class AttendanceSystem:
                 if not faces:
                     continue
 
-                for face in faces:
-                    embedding = face.normed_embedding.tolist()
-                    embedding_vector = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
+                faces = self.capture_faces(fetcher)
+                if not AntiSpoofing.predict(faces):
+                    continue
 
-                    best_match_entry = None
-                    highest_sim = 0.0
+                face = faces[0][1]  
 
-                    result = None
-                    with self.db.connection() as conn:
-                        with conn.cursor() as cur:
-                                cur.execute("""
-                                    SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
-                                    FROM student_faces f
-                                    JOIN students s ON f.kerberos_id = s.kerberos_id
-                                    GROUP BY s.id, s.student_name, s.kerberos_id
-                                    HAVING MIN(f.embedding <=> %s::vector) <= %s
-                                    ORDER BY min_distance ASC
-                                    LIMIT 1;
-                                """, (embedding_vector, embedding_vector, 1-RECOGNITION_THRESHOLD))
+                embedding = face.normed_embedding.tolist()
+                embedding_vector = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
 
-                                result = cur.fetchone()
+                best_match_entry = None
+                highest_sim = 0.0
+
+                result = None
+                with self.db.connection() as conn:
+                    with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT s.student_name, s.kerberos_id, MIN(f.embedding <=> %s::vector) AS min_distance
+                                FROM student_faces f
+                                JOIN students s ON f.kerberos_id = s.kerberos_id
+                                GROUP BY s.id, s.student_name, s.kerberos_id
+                                HAVING MIN(f.embedding <=> %s::vector) <= %s
+                                ORDER BY min_distance ASC
+                                LIMIT 1;
+                            """, (embedding_vector, embedding_vector, 1-RECOGNITION_THRESHOLD))
+
+                            result = cur.fetchone()
                             
-                    if result:
-                        student_name, kerberos_id, min_distance = result
-                        best_match_entry = kerberos_id
-                        highest_sim = max(0.0, 1.0 - float(min_distance))
+                if result:
+                    student_name, kerberos_id, min_distance = result
+                    best_match_entry = kerberos_id
+                    highest_sim = max(0.0, 1.0 - float(min_distance))
 
-                    if not best_match_entry:
-                        continue
-                    
-                    with cache_lock:
-                        current_time = time.time()
-                        if best_match_entry not in collection_cache:
-                            collection_cache[best_match_entry] = {
-                                'samples' : [],
-                                'last_updated': 0.0
-                            }
-
-                        student_data = collection_cache[best_match_entry]
-                        
-                        if current_time - student_data['last_updated'] > 1:
-
-                            new_sample = {
-                                'embedding': embedding_vector,
-                                'detection_score': face.det_score,
-                                'name': student_name
-                            }
-                            student_data['samples'].append(new_sample)
-                            student_data['last_updated'] = current_time
-
-                            if(len(student_data['samples']) == 15):
-                                data = collection_cache.pop(best_match_entry)
-                                event_id = str(int(time.time() * 1000))
+                if not best_match_entry:
+                    continue
                 
-                                # Push into the dictionary instance variable
-                                self.pending_confirmation[event_id] = {
-                                    'kerberos_id': best_match_entry,
-                                    'name': student_name,
-                                    'samples': data['samples']
-                                }
+                with cache_lock:
+                    current_time = time.time()
+                    if best_match_entry not in collection_cache:
+                        collection_cache[best_match_entry] = {
+                            'samples' : [],
+                            'last_updated': 0.0
+                        }
+
+                    student_data = collection_cache[best_match_entry]
+                        
+                    if current_time - student_data['last_updated'] > 1:
+
+                        new_sample = {
+                            'embedding': embedding_vector,
+                            'detection_score': face.det_score,
+                            'name': student_name
+                        }
+                        student_data['samples'].append(new_sample)
+                        student_data['last_updated'] = current_time
+
+                        if(len(student_data['samples']) == 15):
+                            data = collection_cache.pop(best_match_entry)
+                            event_id = str(int(time.time() * 1000))
+                
+                            # Push into the dictionary instance variable
+                            self.pending_confirmation[event_id] = {
+                                'kerberos_id': best_match_entry,
+                                'name': student_name,
+                                'samples': data['samples']
+                            }
                                 
                                 # Update status properties
-                                self._last_attendance_event_id = event_id
-                                self._last_attendance_message = f"Is this {student_name} (ID: {best_match_entry})?"
+                            self._last_attendance_event_id = event_id
+                            self._last_attendance_message = f"Is this {student_name} (ID: {best_match_entry})?"
         
-                    self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
+                self._set_message(f"Best match: {best_match_entry} with similarity {highest_sim:.4f}")
 
-                    current_time = time.time()
-                    if best_match_entry not in recently_marked or \
-                        (current_time - recently_marked[best_match_entry]) > cooldown_period:
-                        end_time = time.time()
-                        self.mark_attendance(best_match_entry, student_name, highest_sim, end_time - start_time)
-                        recently_marked[best_match_entry] = current_time
+                current_time = time.time()
+                if best_match_entry not in recently_marked or \
+                    (current_time - recently_marked[best_match_entry]) > cooldown_period:
+                    end_time = time.time()
+                    self.mark_attendance(best_match_entry, student_name, highest_sim, end_time - start_time)
+                    recently_marked[best_match_entry] = current_time
 
         except KeyboardInterrupt:
             self._set_message("Shutting down gracefully...")

@@ -271,3 +271,6 @@ __pycache__/
 
 #no log files
 attendance_log.txt
+
+FAS/PRNet_Depth_Generation/Data/net-data/
+FAS/FAS_SGTD/fas_sgtd_multi_frame/model_save/

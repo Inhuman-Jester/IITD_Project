@@ -133,6 +133,13 @@ APP_TEMPLATE = """
 </head>
 <body>
     <div class="wrap">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 12px 20px; background: rgba(17, 24, 39, 0.8); border: 1px solid var(--border); border-radius: 14px;">
+            <div style="font-weight: bold; color: var(--accent);">Admin Dashboard</div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <span style="font-size: 0.9rem; color: var(--muted);">Logged in as <strong>admin</strong></span>
+                <a href="{{ url_for('logout') }}" style="color: #ef4444; text-decoration: none; font-size: 0.9rem; font-weight: bold; border: 1px solid rgba(239, 68, 68, 0.4); padding: 6px 14px; border-radius: 8px; background: rgba(239, 68, 68, 0.1);">Logout</a>
+            </div>
+        </div>
         <div class="hero">
             <section class="card">
                 <h1>Smart Attendance Dashboard</h1>
@@ -187,6 +194,15 @@ APP_TEMPLATE = """
                             value="{{ selected_entry_no or suggested_entry_no }}"
                         >
                     </label>
+                    <label for="overwrite" style="display: inline-block; white-space: nowrap;">
+                        <input 
+                            type="checkbox" 
+                            id="overwrite" 
+                            name="overwrite" 
+                            value="1"
+                        >
+                        Overwrite existing registration
+                    </label>
                     <div class="row">
                         <button class="btn" type="submit">Start registration</button>
                     </div>
@@ -196,7 +212,7 @@ APP_TEMPLATE = """
             <section class="card">
                 <h2>Show Registered Face</h2>
                 <p class="muted" style="margin: 8px 0 16px;">Find and preview the saved cropped face image for a Kerberos ID.</p>
-                <form method="get" action="{{ url_for('show_user_route') }}">
+                <form method="GET" action="{{ url_for('show_user_route') }}">
                     <label>Kerberos ID
                         <input type="text" name="entry_no" required>
                     </label>
@@ -221,6 +237,36 @@ APP_TEMPLATE = """
                         {% endif %}
                     </div>
                 {% endif %}
+            </section>
+
+            <section class="card" style="grid-column: span 2;">
+                <h2>Check Student Attendance Records</h2>
+                <p class="muted" style="margin: 8px 0 16px;">Lookup attendance history logs for a specific student using their Kerberos ID.</p>
+                <form id="attendanceSearchForm" onsubmit="fetchAttendanceRecords(event)">
+                    <label>Kerberos ID
+                        <input type="text" id="attendanceKerberosInput" placeholder="Enter Kerberos ID (e.g. mcs252101)" required value="{{ selected_entry_no or '' }}">
+                    </label>
+                    <div class="row">
+                        <button class="btn" type="submit">Lookup Attendance</button>
+                    </div>
+                </form>
+                <div id="attendanceResultsContainer" style="margin-top: 16px; display: none;">
+                    <div id="attendanceResultsHeader" style="font-weight: bold; margin-bottom: 10px; color: var(--accent);"></div>
+                    <div class="list" id="attendanceRecordsList"></div>
+                </div>
+            </section>
+
+            <section class="card" style="grid-column: span 2;">
+                <h2>Delete Registered Images</h2>
+                <p class="muted" style="margin: 8px 0 16px;">Delete all face images and embeddings associated with a Kerberos ID.</p>
+                <form method="POST" action="{{ url_for('delete_images_route') }}" onsubmit="return confirm('Are you sure you want to delete all face images associated with this Kerberos ID?');">
+                    <label>Kerberos ID
+                        <input type="text" name="entry_no" required value="{{ selected_entry_no or '' }}">
+                    </label>
+                    <div class="row">
+                        <button class="btn danger" type="submit">Delete Images</button>
+                    </div>
+                </form>
             </section>
         </div>
 
@@ -323,6 +369,53 @@ APP_TEMPLATE = """
                 });
             }
         }());
+
+        async function fetchAttendanceRecords(event) {
+            event.preventDefault();
+            const input = document.getElementById('attendanceKerberosInput');
+            const container = document.getElementById('attendanceResultsContainer');
+            const header = document.getElementById('attendanceResultsHeader');
+            const list = document.getElementById('attendanceRecordsList');
+
+            if (!input || !input.value.trim()) return;
+            const kerberos = input.value.trim();
+
+            try {
+                const response = await fetch('/attendance/' + encodeURIComponent(kerberos));
+                const data = await response.json();
+                container.style.display = 'block';
+
+                if (!data.found) {
+                    header.textContent = data.message || 'No student found.';
+                    list.innerHTML = '';
+                    return;
+                }
+
+                header.textContent = `Found ${data.count} attendance record(s) for ${kerberos}:`;
+
+                if (data.count === 0) {
+                    list.innerHTML = '<p class="muted" style="margin: 8px 0;">No attendance marked yet for this student.</p>';
+                    return;
+                }
+
+                list.innerHTML = data.records.map(rec => `
+                    <div class="list-item">
+                        <strong>${rec.student_name} (${rec.kerberos_id})</strong>
+                        <div style="font-size: 0.88rem; color: var(--muted); margin-top: 4px;">
+                            Date: <span style="color: var(--text);">${rec.attendance_date}</span> &bull; 
+                            Time: <span style="color: var(--text);">${rec.attendance_time}</span> &bull; 
+                            Similarity: <span style="color: var(--accent);">${rec.similarity.toFixed(4)}</span> &bull; 
+                            Time Taken: <span style="color: var(--text);">${rec.time_taken.toFixed(2)}s</span>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error(err);
+                container.style.display = 'block';
+                header.textContent = 'Error fetching attendance records.';
+                list.innerHTML = '';
+            }
+        }
     </script>
 </body>
 </html>

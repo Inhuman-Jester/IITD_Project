@@ -27,9 +27,10 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from insightface.app import FaceAnalysis
 import threading
-from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, url_for, Response, jsonify
+from flask import Flask, flash, redirect, render_template_string, request, send_from_directory, url_for, Response, jsonify, session
 import logging
 from template.app_template import APP_TEMPLATE
+from template.auth_templates import LOGIN_TEMPLATE, STUDENT_TEMPLATE
 from database.schema import init_db
 from utils.face_recog import AttendanceSystem
 from utils.frame import FrameFetcher
@@ -43,10 +44,16 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 FAS_DIR = os.path.join(CURRENT_DIR, 'FAS')
 FACES_DIR = "registered_faces"
 
+# User Credentials Configuration
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+STUDENT_USERNAME = os.environ.get("STUDENT_USERNAME", "student")
+STUDENT_PASSWORD = os.environ.get("STUDENT_PASSWORD", "student123")
+
 if FAS_DIR not in sys.path:
     sys.path.insert(0, FAS_DIR)
 
-from FAS.nets.utils import get_model
+# from FAS.nets.utils import get_model
 
 # --- Configuration ---
 ESP32_IP = "10.194.17.254"
@@ -98,7 +105,7 @@ class AntiSpoofPredictor:
         self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
         print(f"Loading Anti-Spoofing model ({arch}) on {self.device}...")
 
-        self.model = get_model(arch, num_classes)
+        # self.model = get_model(arch, num_classes)
         checkpoint = torch.load(model_path, map_location='cpu')
 
         if 'state_dict' in checkpoint:
@@ -138,7 +145,7 @@ class AntiSpoofPredictor:
 
 def create_flask_app(system: AttendanceSystem):
     flask_app = Flask(__name__)
-    flask_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "smart-attendance-dashboard")
+    flask_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "smart-attendance-dashboard-secret-key")
 
     def _ensure_recognition_running():
         # Keep recognition running continuously; restart if it ever stops.
@@ -150,6 +157,51 @@ def create_flask_app(system: AttendanceSystem):
     @flask_app.before_request
     def _maintain_recognition_worker():
         _ensure_recognition_running()
+        # Protect routes with login requirement
+        open_endpoints = ['login', 'logout', 'static']
+        if request.endpoint and request.endpoint not in open_endpoints:
+            if not session.get('logged_in'):
+                return redirect(url_for('login'))
+            # Restrict admin endpoints from student access
+            if session.get('role') == 'student' and request.endpoint != 'student_home':
+                return redirect(url_for('student_home'))
+
+    @flask_app.route("/login", methods=["GET", "POST"])
+    def login():
+        if request.method == "POST":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "").strip()
+
+            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                session['logged_in'] = True
+                session['username'] = username
+                session['role'] = 'admin'
+                return redirect(url_for('index'))
+            elif username == STUDENT_USERNAME and password == STUDENT_PASSWORD:
+                session['logged_in'] = True
+                session['username'] = username
+                session['role'] = 'student'
+                return redirect(url_for('student_home'))
+            else:
+                flash("Invalid username or password.")
+                return render_template_string(LOGIN_TEMPLATE)
+
+        if session.get('logged_in'):
+            if session.get('role') == 'admin':
+                return redirect(url_for('index'))
+            return redirect(url_for('student_home'))
+
+        return render_template_string(LOGIN_TEMPLATE)
+
+    @flask_app.route("/logout")
+    def logout():
+        session.clear()
+        flash("You have been logged out.")
+        return redirect(url_for('login'))
+
+    @flask_app.route("/student-home", methods=["GET"])
+    def student_home():
+        return render_template_string(STUDENT_TEMPLATE)
 
     @flask_app.route("/", methods=["GET"])
     def index():
@@ -182,17 +234,17 @@ def create_flask_app(system: AttendanceSystem):
 
     @flask_app.route("/register", methods=["POST"])
     def register_user_route():
-        name = request.form.get("name", "").strip()
         entry_no = request.form.get("entry_no", "").strip()
+        name = request.form.get("name", "").strip()
         overwrite = request.form.get("overwrite") == "1"
 
-        if not name or not entry_no:
-            flash("Name and Kerberos ID are required.")
-            return redirect(url_for("index", entry_no=entry_no, name=name))
+        if not entry_no:
+            flash("Kerberos ID is required.")
+            return redirect(url_for("index", entry_no=entry_no))
 
-        success = system.register_user(name=name, kerberos_id=entry_no, overwrite=overwrite)
+        success = system.register_user(kerberos_id=entry_no, name=name, overwrite=overwrite)
         flash(system.get_last_message() if system.get_last_message() else ("Registration complete." if success else "Registration failed."))
-        return redirect(url_for("index", entry_no=entry_no, name=name))
+        return redirect(url_for("index", entry_no=entry_no))
 
     @flask_app.route("/show", methods=["GET"])
     def show_user_route():
@@ -203,6 +255,17 @@ def create_flask_app(system: AttendanceSystem):
 
         system.show_user(entry_no)
         flash(system.get_last_message() if system.get_last_message() else "Lookup complete.")
+        return redirect(url_for("index", entry_no=entry_no))
+
+    @flask_app.route("/delete-images", methods=["POST"])
+    def delete_images_route():
+        entry_no = request.form.get("entry_no", "").strip()
+        if not entry_no:
+            flash("Kerberos ID is required to delete images.")
+            return redirect(url_for("index"))
+
+        success, count = system.delete_user_images(entry_no)
+        flash(system.get_last_message() if system.get_last_message() else f"Deleted {count} image(s) for Kerberos ID {entry_no}.")
         return redirect(url_for("index", entry_no=entry_no))
 
     @flask_app.route("/faces/<entry_no>", methods=["GET"])
@@ -291,6 +354,22 @@ def create_flask_app(system: AttendanceSystem):
         return jsonify({
             "found": True,
             "name": student["name"]
+        })
+
+    @flask_app.route("/attendance/<kerberos_id>", methods=["GET"])
+    def get_attendance_route(kerberos_id):
+        if not system.exists(kerberos_id):
+            return jsonify({
+                "found": False,
+                "message": f"Student with Kerberos ID {kerberos_id} not found."
+            }), 404
+
+        records = system.get_attendance_records(kerberos_id)
+        return jsonify({
+            "found": True,
+            "kerberos_id": kerberos_id,
+            "count": len(records),
+            "records": records
         })
 
     @flask_app.route("/confirm-attendance", methods=["POST"])

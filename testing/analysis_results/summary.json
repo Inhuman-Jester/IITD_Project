@@ -1,0 +1,39 @@
+{
+    "dataset_summary": {
+        "total_samples": 1275,
+        "total_identities": 43,
+        "total_data_points": 425
+    },
+    "similarity_stats": {
+        "genuine": {
+            "mean": 0.7708790898323059,
+            "median": 0.7796112298965454,
+            "std": 0.1158260628581047,
+            "min": -0.08538069576025009,
+            "max": 0.9915027618408203
+        },
+        "impostor": {
+            "mean": 0.06180604174733162,
+            "median": 0.05800580233335495,
+            "std": 0.081959068775177,
+            "min": -0.24379244446754456,
+            "max": 0.4184335470199585
+        }
+    },
+    "retrieval_metrics": {
+        "top_1_accuracy": 0.9992156862745099,
+        "top_3_accuracy": 0.9992156862745099,
+        "top_5_accuracy": 0.9992156862745099,
+        "top_10_accuracy": 0.9992156862745099,
+        "total_queries": 1275
+    },
+    "threshold_summary": {
+        "eer": 0.008083423438157803,
+        "eer_threshold": 0.266,
+        "best_f1": 0.9959284602758414,
+        "best_f1_threshold": 0.40700000000000003
+    },
+    "failure_cases_count": {
+        "negative_margin_samples": 1
+    }
+}

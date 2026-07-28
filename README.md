@@ -1,48 +1,51 @@
 # Smart Attendance System
 
-Real-time face recognition attendance pipeline using an RTSP IP camera, ArcFace, face anti-spoofing, and an ESP32 OLED display.
+Real-time face recognition attendance web application and pipeline using an RTSP IP camera, InsightFace (ArcFace), PostgreSQL (`pgvector`), Face Anti-Spoofing (FAS), and an optional ESP32 OLED display.
 
 ---
 
 ## Repository Structure
 
 ```
-├── app.py               # Main attendance system
-├── camera.py            # Live feed viewer (testing only)
+├── app.py               # Main Flask Web Application & Dashboard routes
+├── utils/
+│   ├── face_recog.py    # AttendanceSystem controller (InsightFace, Postgres DB, UDP display)
+│   └── frame.py         # Thread-safe RTSP Frame Fetcher
+├── database/
+│   └── schema.py        # Database schema initialization & connection pool (PostgreSQL + pgvector)
+├── template/
+│   └── app_template.py  # HTML5/CSS3 Web Dashboard UI Template
 ├── FAS/                 # Face Anti-Spoofing model code
-├── p1_resnet.pth        # anti-spoofing trained model
-├── board.c              # ESP32 script
-└── testing/             # Evaluation scripts
+├── board.c              # ESP32 sketch code
+└── testing/             # Evaluation & benchmarking scripts
 ```
+
 ---
 
 ## Requirements
 
-### Python
+### Python & Dependencies
 
 Tested on Python 3.9+.
 
 ```bash
-pip install opencv-python
-pip install insightface
-pip install onnxruntime          # CPU-only
-pip install torch torchvision    # CPU build is fine
-pip install albumentations
-pip install Pillow
-pip install numpy
-pip install onvif-zeep           # only needed for camera.py
-pip install urllib3
+pip install -r requirements.txt
 ```
 
-Or install all at once:
+Or install key dependencies manually:
 
 ```bash
-pip install opencv-python insightface onnxruntime torch torchvision albumentations Pillow numpy onvif-zeep urllib3
+pip install flask psycopg2-binary opencv-python insightface onnxruntime torch torchvision albumentations Pillow numpy python-dotenv
 ```
 
-> **ONNX thread patch** — `app.py` patches `onnxruntime` at the top to use 1 thread. This is intentional for single-core servers and must remain as the first lines of the file before any other imports.
+> **ONNX thread patch** — `app.py` patches `onnxruntime` at the top to configure thread counts. This ensures optimal execution for single-core / low-resource servers.
 
-### InsightFace model
+### Database Setup
+
+The project uses PostgreSQL with the `pgvector` extension enabled for embedding search:
+- Tables managed: `students`, `student_faces`, and `attendance_records`.
+
+### InsightFace Model
 
 On first run, InsightFace will automatically download the `buffalo_l` model pack (~300 MB) to `~/.insightface/models/`. Ensure internet access on first launch.
 
@@ -50,86 +53,64 @@ On first run, InsightFace will automatically download the `buffalo_l` model pack
 
 ## Configuration
 
-Open `app.py` and update the constants at the top:
+Environment variables can be configured via a `.env` file in the root directory:
 
-```python
-# ESP32 Display
-ESP32_IP   = "10.x.x.x"        # ← see ESP32 setup section below
-ESP32_PORT = 4210
-
-# Thresholds
-RECOGNITION_THRESHOLD = 0.65   # cosine similarity cutoff
-SPOOF_THRESHOLD       = 1.0    # set <1.0 to enable anti-spoofing rejection
+```env
+ESP32_IP=10.194.17.254
+CAM_IP=10.208.22.128
+CAM_USER=admin
+CAM_PASSWORD=your_password
+FLASK_HOST=0.0.0.0
+FLASK_PORT=5000
 ```
+
+---
+
+## Running the Web Dashboard
+
+Start the web application server:
+
+```bash
+python app.py
+```
+
+Open your browser and navigate to `http://localhost:5000` (or `http://<server-ip>:5000`).
+
+---
+
+## Features & Usage
+
+### 1. Continuous Recognition & Attendance Confirmation
+- Face recognition runs continuously in the background using the live camera RTSP stream.
+- Recognized users trigger attendance logging into PostgreSQL and `attendance_log.txt`.
+- Live attendance confirmations appear on the Web Dashboard and trigger UDP display alerts on the connected ESP32 OLED module.
+
+### 2. User Registration
+- Enter a **Name** and **Kerberos ID** in the **Register User** section of the web dashboard.
+- Captures face embeddings and stores cropped photos directly in PostgreSQL database (`student_faces`) and local cache directory (`registered_faces/`).
+- Supports up to 3 face sample captures per student with two-step verification.
+
+### 3. Show Registered Face
+- Enter a **Kerberos ID** under **Show Registered Face** to search and preview the primary stored cropped face image.
+
+### 4. Delete Registered Images
+- Enter a **Kerberos ID** in the **Delete Registered Images** card section to purge all associated face samples, embeddings, and cached image files from the database and local storage.
+
 ---
 
 ## ESP32 Setup
 
-1. Power on the ESP32 — it will connect to `IITD_WIFI` using the WPA2 Enterprise credentials hardcoded in the sketch (change them if needed).
-2. **On boot, the OLED display shows the assigned IP address for ~10 seconds.**
-3. Note that IP and set it as `ESP32_IP` in `app.py`.
-
-> The ESP32 gets its IP via DHCP, so the IP may change after a power cycle. If the display stops updating, repeat step 1-3.
-
----
-
-## Running
-
-### 1. Register a person
-
-```bash
-python app.py
-# Enter mode: register
-# Enter Name: Alice
-# Enter Entry No: 2022CS11001
-```
-
-Stand in front of the camera. The system waits 3 seconds then captures the best face over a 4-second window. A cropped face photo is saved to `registered_faces/`.
-### 2. View a registered photo
-
-```bash
-python app.py
-# Enter mode: show
-# Enter Entry No: 2022CS11001
-```
-
-Prints the file path.
-
-### 3. Run attendance
-
-```bash
-python app.py
-# Enter mode: run
-```
-
-The system will:
-- Detect faces from the live RTSP feed
-- Run anti-spoofing check
-- Match against the database
-- Log to `attendance_log.txt`
-- Send result to the ESP32 display
-
-Press `Ctrl+C` to stop.
-
-### 4. View live camera feed (testing)
-
-```bash
-python camera.py
-```
-
-Press `P` to save a screenshot, `Q` to quit.
+1. Power on the ESP32 module — it connects to Wi-Fi using the credentials in `board.c`.
+2. On boot, the OLED display shows its assigned IP address.
+3. Update `ESP32_IP` in `.env` or `app.py` if the IP changes.
 
 ---
 
 ## Attendance Log
 
-Matches are appended to `attendance_log.txt`:
+Attendance logs are stored in PostgreSQL (`attendance_records` table) and appended to `attendance_log.txt`:
 
 ```
-2025-05-15 09:31:04 - 2022CS11001 - Alice
-2025-05-15 09:35:22 - 2022CS11002 - Bob
+2026-07-27 15:30:12 - 2022CS11001 - Alice - 0.8912 - 0.45s
 ```
 
-A 30-second cooldown per person prevents duplicate entries.
-
----

@@ -90,7 +90,7 @@ void loop() {
 
       // FIX 2: Assign duration based on message type
       unsigned long duration;
-      if (status == "SUCCESS") {
+      if (status == "MARKED") {
         duration = 6000;
       } else if (status == "SPOOF") {
         duration = 2000;

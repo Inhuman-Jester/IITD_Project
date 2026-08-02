@@ -1,20 +1,65 @@
 import os
+import time
+import psycopg
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
-from pgvector.psycopg import register_vector
 
 load_dotenv()
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://user:password@host:port/dbname")
 
-pool = ConnectionPool(conninfo=DB_URL, min_size=1, max_size=10)
+
+class LazyConnectionPool:
+    def __init__(self, conninfo, min_size=1, max_size=10):
+        self.conninfo = conninfo
+        self.min_size = min_size
+        self.max_size = max_size
+        self._pool = None
+
+    @property
+    def closed(self):
+        return self._pool is None or self._pool.closed
+
+    def _wait_for_database(self, timeout_seconds=60, retry_delay=2):
+        deadline = time.monotonic() + timeout_seconds
+        last_error = None
+
+        while time.monotonic() < deadline:
+            try:
+                with psycopg.connect(self.conninfo, connect_timeout=5) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1;")
+                        cur.fetchone()
+                return
+            except Exception as exc:
+                last_error = exc
+                time.sleep(retry_delay)
+
+        raise last_error if last_error is not None else RuntimeError("Database could not be reached")
+
+    def _ensure_pool(self):
+        if self._pool is None:
+            self._wait_for_database()
+            self._pool = ConnectionPool(conninfo=self.conninfo, min_size=self.min_size, max_size=self.max_size)
+        return self._pool
+
+    def open(self):
+        return self._ensure_pool().open()
+
+    def connection(self):
+        return self._ensure_pool().connection()
+
+    def close(self):
+        if self._pool is not None and not self._pool.closed:
+            self._pool.close()
+
+
+pool = LazyConnectionPool(DB_URL, min_size=1, max_size=10)
 
 def init_db():
     pool.open()
 
     schema_sql = """
-    CREATE EXTENSION IF NOT EXISTS vector;
-
     CREATE TABLE IF NOT EXISTS students (
         id SERIAL PRIMARY KEY,
         student_name VARCHAR(100) NOT NULL,
@@ -69,7 +114,9 @@ def init_db():
     """
 
     with pool.connection() as conn:
-        register_vector(conn)
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            conn.commit()
 
         with conn.cursor() as cur:
             cur.execute(schema_sql)
@@ -78,5 +125,6 @@ def init_db():
 
 
 def close_db():
-    pool.close()
+    if not pool.closed:
+        pool.close()
     print("Database connection pool closed.")

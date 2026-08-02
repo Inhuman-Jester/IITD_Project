@@ -1,0 +1,48 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: iitd-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: attendance
+      POSTGRES_USER: attendance
+      POSTGRES_PASSWORD: attendance
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attendance -d attendance"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iitd-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://attendance:attendance@db:5432/attendance
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+      FLASK_DEBUG: "0"
+      ESP32_IP: ${ESP32_IP:-10.194.17.254}
+      ESP32_PORT: ${ESP32_PORT:-4210}
+      CAM_IP: ${CAM_IP:-10.208.22.128}
+      CAM_USER: ${CAM_USER:-admin}
+      CAM_PASSWORD: ${CAM_PASSWORD:-SOumil@@btp1}
+      REGISTERED_FACES_DIR: /data/registered_faces
+      ATTENDANCE_LOG_FILE: /data/attendance_log.txt
+    ports:
+      - "5000:5000"
+    volumes:
+      - app_data:/data
+      - insightface_cache:/root/.insightface
+
+volumes:
+  postgres_data:
+  app_data:
+  insightface_cache:

@@ -38,6 +38,19 @@ Or install key dependencies manually:
 pip install flask psycopg2-binary opencv-python insightface onnxruntime torch torchvision albumentations Pillow numpy python-dotenv
 ```
 
+### Docker
+
+Run the app and database together with Docker Compose:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The dashboard will be available at `http://localhost:5000`.
+
+The container setup uses a `pgvector` PostgreSQL image, persists app runtime data in Docker volumes, and caches the InsightFace model directory so the face model is not downloaded on every start.
+
 > **ONNX thread patch** — `app.py` patches `onnxruntime` at the top to configure thread counts. This ensures optimal execution for single-core / low-resource servers.
 
 ### Database Setup
@@ -56,12 +69,17 @@ On first run, InsightFace will automatically download the `buffalo_l` model pack
 Environment variables can be configured via a `.env` file in the root directory:
 
 ```env
+DATABASE_URL=postgresql://attendance:attendance@db:5432/attendance
 ESP32_IP=10.194.17.254
+ESP32_PORT=4210
 CAM_IP=10.208.22.128
 CAM_USER=admin
 CAM_PASSWORD=your_password
 FLASK_HOST=0.0.0.0
 FLASK_PORT=5000
+FLASK_DEBUG=0
+REGISTERED_FACES_DIR=/data/registered_faces
+ATTENDANCE_LOG_FILE=/data/attendance_log.txt
 ```
 
 ---

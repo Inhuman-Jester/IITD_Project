@@ -42,7 +42,7 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 FAS_DIR = os.path.join(CURRENT_DIR, 'FAS')
-FACES_DIR = "registered_faces"
+FACES_DIR = os.environ.get("REGISTERED_FACES_DIR", "registered_faces")
 
 # User Credentials Configuration
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
@@ -56,11 +56,11 @@ if FAS_DIR not in sys.path:
 # from FAS.nets.utils import get_model
 
 # --- Configuration ---
-ESP32_IP = "10.194.17.254"
-ESP32_PORT = 4210
+ESP32_IP = os.environ.get("ESP32_IP", "10.194.17.254")
+ESP32_PORT = int(os.environ.get("ESP32_PORT", "4210"))
 RECOGNITION_THRESHOLD = 0.65
 SPOOF_THRESHOLD = 1.0
-LOG_FILE = "attendance_log.txt"
+LOG_FILE = os.environ.get("ATTENDANCE_LOG_FILE", "attendance_log.txt")
 # Registration tuning
 # Countdown before first capture (seconds)
 REGISTRATION_COUNTDOWN = 1
@@ -408,4 +408,5 @@ if __name__ == "__main__":
     app = create_flask_app(system)
     host = os.environ.get("FLASK_HOST", "0.0.0.0")
     port = int(os.environ.get("FLASK_PORT", "5000"))
-    app.run(host=host, port=port, debug=True, threaded=True)
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)

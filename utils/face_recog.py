@@ -16,8 +16,8 @@ load_dotenv()
 print("ESP_IP =", repr(os.getenv("ESP32_IP")))
 
 ESP32_IP = os.getenv("ESP32_IP")
-ESP32_PORT = 4210
-LOG_FILE = "attendance_log.txt"
+ESP32_PORT = int(os.getenv("ESP32_PORT", "4210"))
+LOG_FILE = os.environ.get("ATTENDANCE_LOG_FILE", "attendance_log.txt")
 REG_CAPTURE_WINDOW = 0.5
 CAM_IP = os.getenv("CAM_IP", "10.208.22.128")
 CAM_USER = os.getenv("CAM_USER", "admin")
@@ -28,7 +28,7 @@ RTSP_URL = (
 )
 RECOGNITION_THRESHOLD = 0.65
 REG_VERIFICATION_THRESHOLD = 0.65
-FACES_DIR = "registered_faces"
+FACES_DIR = os.environ.get("REGISTERED_FACES_DIR", "registered_faces")
 CAPTURE_WINDOW_BINS = 10
 
 class ESPDisplay:

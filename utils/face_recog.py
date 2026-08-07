@@ -208,47 +208,71 @@ class AttendanceSystem:
             return False
         
         fetcher = FrameFetcher(RTSP_URL)
-        first_face, first_frame, first_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+        captures = []
 
-        if not first_face or first_score <= RECOGNITION_THRESHOLD:
+        try:
+            for sample_number in range(1, 4):
+                capture = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
+                face, frame, score = capture
+
+                if not face or frame is None or score <= RECOGNITION_THRESHOLD:
+                    self._set_message(f"Failed to capture a clear face for sample {sample_number}. Please try again.")
+                    return False
+
+                captures.append(capture)
+                self._set_message(f"Capture {sample_number} saved. Hold still for the next verification capture.")
+
+            verification_sim = self.cosine_similarity(
+                captures[0][0].normed_embedding,
+                captures[2][0].normed_embedding,
+            )
+            self._set_message(f"Verification similarity: {verification_sim:.4f}")
+
+            threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
+            if verification_sim < threshold:
+                self._set_message("Third verification did not match the first capture. Registration cancelled.")
+                return False
+
+            if overwrite:
+                with self.db.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM student_faces WHERE kerberos_id = %s;",
+                            (kerberos_id,),
+                        )
+
+            for sample_number, (face, frame, _) in enumerate(captures, start=1):
+                x1, y1, x2, y2 = [int(v) for v in face.bbox]
+                h, w = frame.shape[:2]
+                face_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                if face_crop.size == 0:
+                    self._set_message("Captured face was invalid. Please try again.")
+                    return False
+
+                success, encoded_image = cv2.imencode(".jpg", face_crop)
+                if not success:
+                    self._set_message("Failed to encode captured face. Please try again.")
+                    return False
+
+                embedding = face.normed_embedding.tolist()
+                vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
+                face_image = encoded_image.tobytes()
+
+                registered = self.register_main_db(
+                    kerberos_id,
+                    name,
+                    face_image,
+                    vector_literal,
+                    sample_number=sample_number,
+                    overwrite=False,
+                )
+                if not registered:
+                    return False
+
+            self.ui.registering_user(kerberos_id)
+            return True
+        finally:
             fetcher.stop()
-            self._set_message("Failed to capture a clear face. Please try again.")
-            return False
-        
-        self._set_message("First capture saved. Hold still for a second verification capture.")
-        second_face, second_frame, second_score = self._capture_best_face(fetcher, window_seconds=REG_CAPTURE_WINDOW)
-        fetcher.stop()
-
-        if not second_face or second_score <= RECOGNITION_THRESHOLD:
-            self._set_message("Failed to capture a clear verification face. Please try again.")
-            return False
-
-        verification_sim = self.cosine_similarity(first_face.normed_embedding, second_face.normed_embedding)
-        self._set_message(f"Verification similarity: {verification_sim:.4f}")
-
-        threshold = REG_VERIFICATION_THRESHOLD if REG_VERIFICATION_THRESHOLD is not None else RECOGNITION_THRESHOLD
-        if verification_sim < threshold:
-            self._set_message("Second verification did not match the first capture. Registration cancelled.")
-            return False
-        x1, y1, x2, y2 = [int(v) for v in first_face.bbox]
-        h, w = first_frame.shape[:2]
-        face_crop = first_frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-        if face_crop.size == 0:
-            self._set_message("Captured face was invalid. Please try again.")
-            return False
-
-        success, encoded_image = cv2.imencode(".jpg", face_crop)
-        if not success:
-            self._set_message("Failed to encode captured face. Please try again.")
-            return False
-
-        embedding = first_face.normed_embedding.tolist()
-        vector_literal = "[" + ",".join(f"{value:.8f}" for value in embedding) + "]"
-        face_image = encoded_image.tobytes()
-
-        registered = self.register_main_db(kerberos_id, name, face_image, vector_literal, overwrite=overwrite)
-        if not registered:
-            return False
         
         # sample = 1
         # while sample <= 3:  # allow up to 3 captures within the window to find a good face
@@ -277,10 +301,7 @@ class AttendanceSystem:
         #         if(not check):
         #             return False
 
-        self.ui.registering_user(kerberos_id)
-        return True
-    
-    def register_main_db(self, kerberos_id, student_name, face_image, vector_literal, overwrite=False):
+    def register_main_db(self, kerberos_id, student_name, face_image, vector_literal, sample_number=None, overwrite=False):
         try:
             with self.db.connection() as conn:
                 with conn.cursor() as cur:
@@ -319,8 +340,6 @@ class AttendanceSystem:
                         print(f"Face count for {kerberos_id}: {face_count}")
                         self._set_message(f"{kerberos_id} already has 3 face samples. Check overwrite to replace existing samples.")
                         return False
-
-                    sample_number = face_count + 1
                     
                     # 4. Insert the new face sample safely
                     cur.execute(
